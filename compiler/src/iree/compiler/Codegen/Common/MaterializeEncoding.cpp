@@ -79,14 +79,32 @@ materializeFuncOpEncodings(FunctionOpInterface funcOp,
                                                 targetAttr.getConfiguration()));
     } else if (isROCMBackend(targetAttr)) {
       LDBG("Select GPUEncodingLayoutAttr attribute as the layout attribute.");
+      SmallVector<NamedAttribute> configItems{
+          NamedAttribute(kGPUTargetAttrName, getGPUTargetAttr(targetAttr))};
+      // Add a potentially pre-resolved encoding configuration.
+      // TODO(jtuyls): Support this for other targets as well?
+      DictionaryAttr config = targetAttr.getConfiguration();
+      if (Attribute encodingAttr = config.get("encoding")) {
+        if (auto layoutAttr =
+                dyn_cast<IREE::GPU::GPUEncodingLayoutAttr>(encodingAttr)) {
+          DictionaryAttr layoutConfig = layoutAttr.getConfiguration();
+          if (layoutConfig) {
+            configItems.append(layoutConfig.getValue().begin(),
+                               layoutConfig.getValue().end());
+          }
+        }
+      }
       layoutAttr = cast<IREE::Codegen::LayoutAttrInterface>(
-          IREE::GPU::GPUEncodingLayoutAttr::get(ctx,
-                                                getGPUTargetAttr(targetAttr)));
+          IREE::GPU::GPUEncodingLayoutAttr::get(
+              ctx, DictionaryAttr::get(ctx, configItems)));
     } else if (testCLGPUTarget) {
       LDBG("Select GPUEncodingLayoutAttr attribute as the layout attribute. "
            "(testCLGPUTarget)");
       layoutAttr = cast<IREE::Codegen::LayoutAttrInterface>(
-          IREE::GPU::GPUEncodingLayoutAttr::get(ctx, getCLGPUTarget(ctx)));
+          IREE::GPU::GPUEncodingLayoutAttr::get(
+              ctx,
+              DictionaryAttr::get(ctx, NamedAttribute(kGPUTargetAttrName,
+                                                      getCLGPUTarget(ctx)))));
     } else {
       LDBG("Select EncodingNopLayoutAttr attribute as the layout attribute.");
       layoutAttr = IREE::Codegen::EncodingNopLayoutAttr::get(ctx);
