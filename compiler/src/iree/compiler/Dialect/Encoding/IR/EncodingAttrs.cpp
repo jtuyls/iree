@@ -21,10 +21,30 @@
 
 namespace mlir::iree_compiler::IREE::Encoding {
 
+//===---------------------------------------------------------------------===//
+// encoding.encoding
+//===---------------------------------------------------------------------===//
+
+static AffineMap getComposedAffineMap(Attribute attr) {
+  if (auto mapAttr = llvm::dyn_cast<AffineMapAttr>(attr)) {
+    return mapAttr.getAffineMap();
+  }
+  if (auto mapsAttr = llvm::dyn_cast<ArrayAttr>(attr)) {
+    if (mapsAttr.empty())
+      return AffineMap();
+    AffineMap map =
+        llvm::cast<AffineMapAttr>(mapsAttr[mapsAttr.size() - 1]).getAffineMap();
+    for (ssize_t i = mapsAttr.size() - 2; i >= 0; i--) {
+      map = map.compose(llvm::cast<AffineMapAttr>(mapsAttr[i]).getAffineMap());
+    }
+    return map;
+  }
+  return AffineMap();
+}
+
 EncodingAttr EncodingAttr::get(MLIRContext *ctx, int64_t operandIndex,
                                EncodingOpType opType, ArrayRef<Type> elemTypes,
                                ArrayRef<AffineMap> maps,
-                               std::optional<AffineMap> bcastMap,
                                ArrayRef<int64_t> roundDimsTo,
                                ArrayRef<Attribute> layouts) {
   Builder b(ctx);
@@ -32,31 +52,89 @@ EncodingAttr EncodingAttr::get(MLIRContext *ctx, int64_t operandIndex,
   auto roundDimsToAttr = roundDimsTo.empty()
                              ? DenseI64ArrayAttr()
                              : b.getDenseI64ArrayAttr(roundDimsTo);
-  auto bcastMapAttr = bcastMap.has_value()
-                          ? AffineMapAttr::get(bcastMap.value())
-                          : AffineMapAttr();
   auto layoutsAttr = layouts.empty() ? ArrayAttr() : b.getArrayAttr(layouts);
   return get(ctx, b.getIndexAttr(operandIndex), opTypeAttr,
              b.getTypeArrayAttr(elemTypes), b.getAffineMapArrayAttr(maps),
-             bcastMapAttr, roundDimsToAttr, layoutsAttr);
+             roundDimsToAttr, layoutsAttr);
+}
+
+static bool isNestedAffineMapOrArrayAttr(Attribute attr, unsigned maxDepth) {
+  if (isa<AffineMapAttr>(attr)) {
+    return true;
+  }
+  if (auto arrayAttr = llvm::dyn_cast<ArrayAttr>(attr)) {
+    if (maxDepth == 0) {
+      return false;
+    }
+    return llvm::all_of(arrayAttr.getValue(), [&](Attribute nestedAttr) {
+      return isNestedAffineMapOrArrayAttr(nestedAttr, maxDepth - 1);
+    });
+  }
+  return false;
+}
+
+LogicalResult
+EncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
+                     IntegerAttr operandIndexAttr,
+                     EncodingOpTypeAttr opTypeAttr, ArrayAttr elementTypesAttr,
+                     ArrayAttr userIndexingMapsAttr,
+                     DenseArrayAttr roundDimsToAttr, ArrayAttr layoutsAttr) {
+  if (userIndexingMapsAttr) {
+    unsigned index = operandIndexAttr.getValue().getZExtValue();
+    if (index >= userIndexingMapsAttr.size()) {
+      return emitError()
+             << "`operandIndex` exceeds the size of `user_indexing_maps`";
+    }
+    if (!isNestedAffineMapOrArrayAttr(userIndexingMapsAttr, 2)) {
+      return emitError() << "`user_indexing_maps` should be a nested array of "
+                            "`AffineMapAttr` with max 2 nesting levels";
+    }
+  }
+  return success();
 }
 
 AffineMap EncodingAttr::getMapForOperandIndex() const {
-  auto index = getOperandIndex().getValue().getZExtValue();
-  switch (index) {
-  case MATMUL_LHS:
-  case MATMUL_RHS:
-  case MATMUL_RESULT: {
-    auto indexingMap =
-        llvm::cast<AffineMapAttr>(getUserIndexingMaps()[index]).getAffineMap();
-    if (auto bcastMap = getBcastMap()) {
-      indexingMap = bcastMap.getAffineMap().compose(indexingMap);
-    }
-    return indexingMap;
-  }
-  default:
+  unsigned index = getOperandIndex().getValue().getZExtValue();
+  ArrayAttr userIndexingMaps = getUserIndexingMaps();
+  if (!userIndexingMaps || index >= userIndexingMaps.size()) {
     return AffineMap();
   }
+  Attribute indexingMap = userIndexingMaps[index];
+  return getComposedAffineMap(indexingMap);
+}
+
+SmallVector<AffineMap> EncodingAttr::getFirstMaps() const {
+  return llvm::map_to_vector(
+      getUserIndexingMaps(), [](Attribute m) -> AffineMap {
+        if (auto mapAttr = llvm::dyn_cast<AffineMapAttr>(m)) {
+          return llvm::cast<AffineMapAttr>(m).getAffineMap();
+        }
+        if (auto mapsAttr = llvm::dyn_cast<ArrayAttr>(m)) {
+          if (mapsAttr.empty())
+            return AffineMap();
+          return llvm::cast<AffineMapAttr>(mapsAttr[0]).getAffineMap();
+        }
+        return AffineMap();
+      });
+}
+
+AffineMap EncodingAttr::getLastMapForOperandIndex() const {
+  unsigned index = getOperandIndex().getValue().getZExtValue();
+  ArrayAttr userIndexingMaps = getUserIndexingMaps();
+  if (!userIndexingMaps || index >= userIndexingMaps.size()) {
+    return AffineMap();
+  }
+  Attribute indexingMap = userIndexingMaps[index];
+  if (auto mapAttr = llvm::dyn_cast<AffineMapAttr>(indexingMap)) {
+    return mapAttr.getAffineMap();
+  }
+  if (auto mapsAttr = llvm::dyn_cast<ArrayAttr>(indexingMap)) {
+    if (mapsAttr.empty())
+      return AffineMap();
+    return llvm::cast<AffineMapAttr>(mapsAttr[mapsAttr.size() - 1])
+        .getAffineMap();
+  }
+  return AffineMap();
 }
 
 std::optional<unsigned>
@@ -79,10 +157,28 @@ SmallVector<Type> EncodingAttr::getElementTypesArray() {
   });
 }
 
-EncodingAttr EncodingAttr::clone(AffineMap bcastMap) {
-  return get(bcastMap.getContext(), getOperandIndex(), getOpType(),
-             getElementTypes(), getUserIndexingMaps(),
-             AffineMapAttr::get(bcastMap), getRoundDimsTo(), getLayouts());
+EncodingAttr EncodingAttr::clone(AffineMap newIndexingMap) {
+  ArrayAttr userIndexingMaps = getUserIndexingMaps();
+  SmallVector<Attribute> newMaps(userIndexingMaps.begin(),
+                                 userIndexingMaps.end());
+  unsigned operandIndex = getOperandIndex().getValue().getZExtValue();
+  assert(operandIndex < newMaps.size() && "invalid operand index");
+  if (newIndexingMap) {
+    SmallVector<Attribute> maps;
+    if (auto mapForIndex =
+            llvm::dyn_cast<AffineMapAttr>(newMaps[operandIndex])) {
+      maps.push_back(AffineMapAttr::get(mapForIndex.getAffineMap()));
+    } else if (auto mapForIndex =
+                   llvm::dyn_cast<ArrayAttr>(newMaps[operandIndex])) {
+      maps.assign(mapForIndex.begin(), mapForIndex.end());
+    }
+    maps.push_back(AffineMapAttr::get(newIndexingMap));
+    newMaps[operandIndex] = ArrayAttr::get(newIndexingMap.getContext(), maps);
+  }
+  return get(newIndexingMap.getContext(), getOperandIndex(), getOpType(),
+             getElementTypes(),
+             ArrayAttr::get(newIndexingMap.getContext(), newMaps),
+             getRoundDimsTo(), getLayouts());
 }
 
 bool EncodingAttr::isSerialized() const { return getLayouts() ? true : false; }
@@ -91,7 +187,6 @@ Attribute EncodingAttr::cloneWithLayouts(ArrayRef<Attribute> layouts) const {
   MLIRContext *ctx = getContext();
   return get(ctx, getOperandIndex(), getOpType(), getElementTypes(),
              /*user_indexing_maps=*/ArrayAttr(),
-             /*bcast_map=*/AffineMapAttr(),
              /*round_dims_to=*/DenseI64ArrayAttr(),
              ArrayAttr::get(ctx, layouts));
 }
@@ -217,6 +312,10 @@ Value EncodingAttr::calculateStorageSizeInBytes(Location loc,
 
   return result;
 }
+
+//===---------------------------------------------------------------------===//
+// encoding.pad_encoding_layout
+//===---------------------------------------------------------------------===//
 
 Value PadEncodingLayoutAttr::calculateStorageSizeInBytes(
     Location loc, OpBuilder &builder, RankedTensorType type,
