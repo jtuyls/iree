@@ -248,6 +248,7 @@ def PadEncodingLayoutAttr : IREEEncoding_Attr<"PadEncodingLayout", [
       DeclareAttrInterfaceMethods<IREEEncoding_SerializableEncodingAttrInterface, [
          "calculateStorageSizeInBytes",
          "isIdentityLayout",
+         "convertType",
         ]>
     ]> {
   let mnemonic = "pad_encoding_layout";

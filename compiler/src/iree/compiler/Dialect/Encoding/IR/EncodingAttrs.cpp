@@ -598,6 +598,28 @@ Value PadEncodingLayoutAttr::calculateStorageSizeInBytes(
       dynamicProduct, arith::IntegerOverflowFlags::nsw);
 }
 
+FailureOr<mlir::Type> PadEncodingLayoutAttr::convertType(mlir::Type type) const {
+  return TypeSwitch<mlir::Type, LogicalResult>(type)
+    .Case<RankedTensorType>([&](auto concreteType) {
+      return concreteType.dropEncoding();
+    })
+    .Case<IREE::Flow::DispatchTensorType>([&](auto concreteType) {
+      auto rankedTensorType = dyn_cast<RankedTensorType>(concreteType.getBoundType());
+      if (!rankedTensorType) {
+        return concreteType;
+      }
+      // The incoming bindings have the padded type, if `pad_encoding_layout` is
+      // present.
+      if (getPadLayout(rankedTensorType)) {
+        rankedTensorType = getPaddedType(rankedTensorType);
+      }
+      return IREE::Flow::DispatchTensorType::get(concreteType.getAccess(), rankedTensorType);
+    })
+    .Default([&](auto concreteType) {
+      return concreteType;
+    });
+}
+
 //===---------------------------------------------------------------------===//
 // iree_encoding.identity_encoding
 //===---------------------------------------------------------------------===//

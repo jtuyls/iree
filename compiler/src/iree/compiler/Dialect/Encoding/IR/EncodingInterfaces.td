@@ -196,7 +196,21 @@ def IREEEncoding_SerializableEncodingAttrInterface :
         assert(false && "unimplemented interface method");
         return {};
       }]
-    >
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        TODO
+      }],
+      /*retTy=*/"::mlir::FailureOr<::mlir::Type>",
+      /*methodName=*/"convertType",
+      /*args=*/(ins
+        "::mlir::Type":$type
+      ),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return type;
+      }]
+    >,
   ];
 
   let extraClassDeclaration = [{
