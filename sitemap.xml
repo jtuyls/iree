@@ -281,6 +281,70 @@
          <lastmod>2025-04-29</lastmod>
     </url>
     <url>
+         <loc>https://iree.dev/reference/mlir-dialects/Check/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/Encoding/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/Flow/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/HAL/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/HALInline/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/HALLoader/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/IOParameters/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/IREECodegen/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/IREEGPU/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/IREEVectorExt/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/LinalgExt/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/Stream/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/TensorExt/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/Util/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/VM/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
+         <loc>https://iree.dev/reference/mlir-dialects/VMVX/</loc>
+         <lastmod>2025-04-29</lastmod>
+    </url>
+    <url>
          <loc>https://iree.dev/community/blog/archive/2024/</loc>
          <lastmod>2025-04-29</lastmod>
     </url>
