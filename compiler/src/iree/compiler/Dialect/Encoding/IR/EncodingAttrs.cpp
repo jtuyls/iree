@@ -7,6 +7,7 @@
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 
 #include "iree/compiler/Dialect/Encoding/IR/EncodingDialect.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
@@ -596,6 +597,42 @@ Value PadEncodingLayoutAttr::calculateStorageSizeInBytes(
   return builder.createOrFold<arith::MulIOp>(
       loc, builder.create<arith::ConstantIndexOp>(loc, staticProduct),
       dynamicProduct, arith::IntegerOverflowFlags::nsw);
+}
+
+// Returns a padded tensor type (without encoding) for tensor types with the
+// pad encoding layout, or the same type for all other tensors.
+static RankedTensorType getPaddedType(PadEncodingLayoutAttr layout,
+                                      RankedTensorType type) {
+  if (layout.isIdentityLayout()) {
+    return type.dropEncoding();
+  }
+
+  ArrayRef<int32_t> padding = layout.getPadding().asArrayRef();
+  auto newShape = llvm::to_vector_of<int64_t>(type.getShape());
+  for (auto [newDim, padValue] : llvm::zip_equal(newShape, padding)) {
+    assert((padValue == 0 || !ShapedType::isDynamic(newDim)) &&
+           "Padding dynamic dims not supported");
+    newDim += padValue;
+  }
+
+  return RankedTensorType::get(newShape, type.getElementType());
+}
+
+mlir::Type PadEncodingLayoutAttr::convertType(mlir::Type type) const {
+  return TypeSwitch<mlir::Type, mlir::Type>(type)
+      .Case<RankedTensorType>(
+          [&](auto concreteType) { return concreteType.dropEncoding(); })
+      .Case<IREE::TensorExt::DispatchTensorType>([&](auto concreteType) {
+        auto rankedTensorType =
+            dyn_cast<RankedTensorType>(concreteType.getBoundType());
+        if (!rankedTensorType) {
+          return concreteType;
+        }
+        rankedTensorType = getPaddedType(*this, rankedTensorType);
+        return IREE::TensorExt::DispatchTensorType::get(
+            concreteType.getAccess(), rankedTensorType);
+      })
+      .Default([&](auto concreteType) { return concreteType; });
 }
 
 //===---------------------------------------------------------------------===//

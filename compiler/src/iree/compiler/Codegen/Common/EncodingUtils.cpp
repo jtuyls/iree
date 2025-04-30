@@ -7,13 +7,17 @@
 #include "iree/compiler/Codegen/Common/EncodingUtils.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/Utils/Utils.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 #include <optional>
+
+#define DEBUG_TYPE "iree-codegen-encoding-utils"
 
 namespace mlir::iree_compiler {
 
@@ -21,6 +25,38 @@ using IREE::Codegen::MaterializeEncodingInfo;
 using IREE::Encoding::EncodingAttr;
 using IREE::Encoding::getEncodingAttr;
 using IREE::Encoding::getEncodingContractionDims;
+using IREE::Encoding::PadEncodingLayoutAttr;
+using IREE::Encoding::SerializableEncodingAttrInterface;
+
+// Returns the layout as a SerializableEncodingAttrInterface, or nullptr if this
+// is not the only layout or if there's no encoding at all.
+static SerializableEncodingAttrInterface
+getSerializableEncodingAttr(Attribute layoutAttr, RankedTensorType type) {
+  if (!type.getEncoding()) {
+    return nullptr;
+  }
+  auto encoding =
+      dyn_cast_or_null<IREE::Encoding::LayoutAttr>(type.getEncoding());
+  if (encoding) {
+    ArrayAttr layouts = encoding.getLayouts();
+    if (layouts.size() != 1) {
+      return nullptr;
+    }
+    return dyn_cast<SerializableEncodingAttrInterface>(*layouts.begin());
+  }
+  auto encodingResolver =
+      dyn_cast<IREE::Encoding::EncodingLayoutResolverAttrInterface>(layoutAttr);
+  if (!encodingResolver) {
+    return nullptr;
+  }
+  Attribute resolvedEncoding = encodingResolver.getLayout(type);
+  LLVM_DEBUG({
+    llvm::dbgs() << "Unresolved type: " << type << "\n";
+    llvm::dbgs() << "layoutAttr: " << layoutAttr << "\n";
+    llvm::dbgs() << "Resolved into: " << resolvedEncoding << "\n";
+  });
+  return dyn_cast<SerializableEncodingAttrInterface>(resolvedEncoding);
+}
 
 MaterializeEncodingTypeConverter::MaterializeEncodingTypeConverter(
     IREE::Codegen::LayoutAttrInterface layoutAttr)
@@ -29,43 +65,37 @@ MaterializeEncodingTypeConverter::MaterializeEncodingTypeConverter(
   addConversion([](IndexType indexType) { return indexType; });
   addConversion([](FloatType floatType) { return floatType; });
   addConversion([](MemRefType memrefType) { return memrefType; });
-  addConversion([=](RankedTensorType type) -> RankedTensorType {
-    // For a given tensor type with an encoding, return the materialized
-    // type to use for it. If no encoding is set, then return the tensor type
-    // itself.
-    MaterializeEncodingInfo encodingInfo = getEncodingInfo(type);
-    if (IREE::Codegen::isIdentityLayout(encodingInfo)) {
-      return type.dropEncoding();
+  addConversion([=](RankedTensorType type) {
+    SerializableEncodingAttrInterface serializableEncodingAttr =
+        getSerializableEncodingAttr(getLayoutAttr(), type);
+    if (serializableEncodingAttr) {
+      return cast<RankedTensorType>(serializableEncodingAttr.convertType(type));
     }
-    auto packedType = cast<RankedTensorType>(linalg::PackOp::inferPackedType(
-        type, encodingInfo.innerTileSizes, encodingInfo.innerDimsPos,
-        encodingInfo.outerDimsPerm));
-
-    // There is no swizzle, we are already done. Typically the case on CPU.
-    if (!encodingInfo.swizzle) {
-      return packedType;
-    }
-
-    // There is a swizzle, we need to handle it. Typically the case on GPU.
-    auto swizzle = *encodingInfo.swizzle;
-    SmallVector<int64_t> newShape(
-        packedType.getShape().drop_back(encodingInfo.innerTileSizes.size()));
-    SmallVector<int64_t> swizzledTileShape =
-        IREE::Codegen::getExpandedTileShape(swizzle.expandShape);
-    applyPermutationToVector(swizzledTileShape, swizzle.permutation);
-    newShape.append(swizzledTileShape);
-    return RankedTensorType::get(newShape, packedType.getElementType());
+    return type.dropEncoding();
   });
-  addConversion([&](IREE::TensorExt::DispatchTensorType dispatchTensorType)
-                    -> IREE::TensorExt::DispatchTensorType {
-    Type boundType = dispatchTensorType.getBoundType();
-    Type convertedBoundType = convertType(boundType);
-    if (convertedBoundType == boundType) {
+  addConversion([&](IREE::TensorExt::DispatchTensorType dispatchTensorType) {
+    auto boundType =
+        dyn_cast<RankedTensorType>(dispatchTensorType.getBoundType());
+    if (!boundType || !boundType.getEncoding()) {
       return dispatchTensorType;
     }
+    SerializableEncodingAttrInterface serializableEncodingAttr =
+        getSerializableEncodingAttr(getLayoutAttr(), boundType);
+    if (serializableEncodingAttr) {
+      return cast<IREE::TensorExt::DispatchTensorType>(
+          serializableEncodingAttr.convertType(dispatchTensorType));
+    }
+    Type convertedBoundType = convertType(boundType);
     return IREE::TensorExt::DispatchTensorType::get(
         dispatchTensorType.getAccess(), convertedBoundType);
   });
+}
+
+bool MaterializeEncodingTypeConverter::isIdentityLayout(
+    RankedTensorType type) const {
+  SerializableEncodingAttrInterface layout =
+      getSerializableEncodingAttr(getLayoutAttr(), type);
+  return layout && !layout.isIdentityLayout();
 }
 
 MaterializeEncodingConversionTarget::MaterializeEncodingConversionTarget(

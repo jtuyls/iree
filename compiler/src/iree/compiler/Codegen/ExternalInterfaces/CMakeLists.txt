@@ -15,11 +15,13 @@ iree_cc_library(
     ExternalModels
   HDRS
     "CPUEncodingExternalModels.h"
+    "CodegenExternalModels.h"
     "GPUEncodingExternalModels.h"
     "Interfaces.h"
     "Utils.h"
   SRCS
     "CPUEncodingExternalModels.cpp"
+    "CodegenExternalModels.cpp"
     "GPUEncodingExternalModels.cpp"
     "Interfaces.cpp"
     "Utils.cpp"

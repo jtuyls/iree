@@ -45,6 +45,8 @@ public:
   IREE::Codegen::MaterializeEncodingInfo
   getEncodingInfo(RankedTensorType type) const;
 
+  bool isIdentityLayout(RankedTensorType type) const;
+
 private:
   const IREE::Codegen::LayoutAttrInterface layoutAttr;
 };
