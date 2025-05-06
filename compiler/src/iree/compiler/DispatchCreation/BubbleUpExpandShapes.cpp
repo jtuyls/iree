@@ -123,6 +123,61 @@ struct BubbleExpandThroughExtract final
   }
 };
 
+// struct BubbleCollapseThroughSetEncoding
+//     : OpRewritePattern<tensor::CollapseShapeOp> {
+//   using OpRewritePattern<tensor::CollapseShapeOp>::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(tensor::CollapseShapeOp collapseOp,
+//                                 PatternRewriter &rewriter) const override {
+//     Value reshapeTgt = collapseOp.getSrc();
+//     auto reshapeSrcType = cast<RankedTensorType>(reshapeSrc.getType());
+//     auto loadOp =
+//         reshapeSrc.getDefiningOp<IREE::TensorExt::DispatchTensorLoadOp>();
+//     if (!loadOp)
+//       return failure();
+
+//     // Make sure we are loading the full incoming subspan. Otherwise we cannot
+//     // simply adjust the subspan's resultant type later.
+//     if (!isFullSlice(loadOp, loadOp.getSourceType(), loadOp.getSourceDims())) {
+//       return failure();
+//     }
+
+//     auto subspanOp = loadOp.getSource()
+//                          .getDefiningOp<IREE::HAL::InterfaceBindingSubspanOp>();
+//     if (!subspanOp)
+//       return failure();
+
+//     OpBuilder::InsertionGuard guard(rewriter);
+//     rewriter.setInsertionPoint(subspanOp);
+//     SmallVector<OpFoldResult> collapsedShape = inferCollapsedShape(
+//         rewriter, subspanOp.getLoc(), reshapeSrcType,
+//         reshapeOp.getReassociationIndices(), subspanOp.getDynamicDims());
+//     SmallVector<int64_t> collapsedStaticShape;
+//     SmallVector<Value> collapsedDynamicShape;
+//     dispatchIndexOpFoldResults(collapsedShape, collapsedDynamicShape,
+//                                collapsedStaticShape);
+
+//     auto tensorAccess =
+//         llvm::cast<IREE::TensorExt::DispatchTensorType>(subspanOp.getType())
+//             .getAccess();
+//     auto newSubspanType = IREE::TensorExt::DispatchTensorType::get(
+//         tensorAccess, reshapeOp.getResultType());
+
+//     Value newSubspanOp = rewriter.create<IREE::HAL::InterfaceBindingSubspanOp>(
+//         subspanOp.getLoc(), newSubspanType, subspanOp.getLayout(),
+//         subspanOp.getBinding(), subspanOp.getByteOffset(),
+//         collapsedDynamicShape, subspanOp.getAlignmentAttr(),
+//         subspanOp.getDescriptorFlagsAttr());
+
+//     rewriter.setInsertionPoint(reshapeOp);
+//     rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorLoadOp>(
+//         reshapeOp, reshapeOp.getResultType(), newSubspanOp,
+//         collapsedDynamicShape);
+
+//     return success();
+//   }
+// };
+
 } // namespace
 
 /// If the domain of the operation is being expanded by unit dimensions, check
@@ -166,9 +221,12 @@ void BubbleUpExpandShapesPass::runOnOperation() {
       [&](OpOperand *fusedOperand) {
         Operation *producer = fusedOperand->get().getDefiningOp();
         Operation *consumer = fusedOperand->getOwner();
-        if (!IREE::Flow::isNonNullAndOutsideDispatch({producer, consumer})) {
+        if (!producer || !consumer) {
           return false;
         }
+        // if (!IREE::Flow::isNonNullAndOutsideDispatch({producer, consumer})) {
+        //   return false;
+        // }
 
         if (canCauseReshapingLoopByExpansion(producer, consumer)) {
           return false;

@@ -10,19 +10,33 @@
 
 iree_add_all_subdirs()
 
+iree_tablegen_library(
+  NAME
+    PassesIncGen
+  TD_FILE
+    "Passes.td"
+  OUTS
+    --gen-pass-decls Passes.h.inc
+)
+
 iree_cc_library(
   NAME
     Transforms
   HDRS
+    "Passes.h"
+    "Passes.h.inc"
     "Transforms.h"
   SRCS
     "Folders.cpp"
+    "FuseCollapseIntoStore.cpp"
+    "Passes.cpp"
   DEPS
     LLVMSupport
     MLIRAffineDialect
     MLIRAffineUtils
     MLIRTensorDialect
     MLIRTransformUtils
+    iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::TensorExt::IR
   PUBLIC
 )

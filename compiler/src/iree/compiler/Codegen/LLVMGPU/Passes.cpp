@@ -22,6 +22,7 @@
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/HAL/Transforms/Passes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "iree/compiler/Dialect/TensorExt/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
 #include "llvm/ADT/STLForwardCompat.h"
@@ -1224,6 +1225,7 @@ static void buildLLVMGPUCodegenConfigurationPassPipelineImpl(
     // This materializes into 'nop' in the absence of pad encoding layout
     // attributes.
     funcPassManager.addPass(createBlockDynamicDimensionsPass);
+    funcPassManager.addPass(IREE::TensorExt::createFuseCollapseIntoStorePass);
     funcPassManager.addPass(createConfigTrackingCanonicalizerPass);
     funcPassManager.addPass(createCSEPass);
   }

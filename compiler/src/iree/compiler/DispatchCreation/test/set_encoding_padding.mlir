@@ -234,3 +234,42 @@ util.func @check_padding_threshold(%lhs : tensor<?x?xf32>, %rhs0 : tensor<?x2048
 //       CHECK:     linalg.matmul
 //  CHECK-SAME:         ins(%[[UNSET_ENCODING]],
 //       CHECK:   return %[[DISPATCH1]]
+
+// -----
+
+// Check that padding encoding can be set across collapse_shape ops.
+util.func @encoding_across_collapse2(%lhs : tensor<?x2048xf32>, %rhs : tensor<2048x?xf32>,
+    %M : index, %N : index) -> tensor<?x?xf32> {
+  %c0 = arith.constant 0.0 : f32
+  %0 = flow.dispatch.region[%M] -> (tensor<?x128x16xf32>{%M}) {
+    %1 = tensor.empty(%M) : tensor<?x128x16xf32>
+    flow.return %1 : tensor<?x128x16xf32>
+  } count(%w0: index) -> (index, index, index) {
+    %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice %w0
+    flow.return %x, %y, %z : index, index, index
+  }
+  %1 = tensor.collapse_shape %0 [[0], [1, 2]] : tensor<?x128x16xf32> into tensor<?x2048xf32>
+  %3 = flow.dispatch.region[%M, %N] -> (tensor<?x?xf32>{%M, %N}) {
+    %4 = tensor.empty(%M, %N) : tensor<?x?xf32>
+    %5 = linalg.fill ins(%c0 : f32) outs(%4 : tensor<?x?xf32>) -> tensor<?x?xf32>
+    %6 = linalg.matmul ins(%1, %rhs : tensor<?x2048xf32>, tensor<2048x?xf32>)
+        outs(%5 : tensor<?x?xf32>) -> tensor<?x?xf32>
+    flow.return %6 : tensor<?x?xf32>
+  } count(%w0: index, %w1 : index) -> (index, index, index) {
+    %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice %w0, %w1
+    flow.return %x, %y, %z : index, index, index
+  }
+  util.return %3 : tensor<?x?xf32>
+}
+// CHECK-LABEL: @encoding_across_collapse2
+//       CHECK:   %[[DISPATCH0:.+]] = flow.dispatch.region
+//  CHECK-SAME:       -> (tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>
+//       CHECK:     %[[EMPTY:.+]] = tensor.empty
+//       CHECK:     %[[COLLAPSE:.+]] = tensor.collapse_shape %[[EMPTY]]
+//       CHECK:     %[[SET_ENCODING:.+]] = iree_encoding.set_encoding %[[COLLAPSE]]
+//       CHECK:     flow.return %[[SET_ENCODING]]
+//       CHECK:   %[[DISPATCH1:.+]] = flow.dispatch.region
+//       CHECK:     %[[UNSET_ENCODING:.+]] = iree_encoding.unset_encoding
+//  CHECK-SAME:         -> tensor<?x2048xf32>
+//       CHECK:     linalg.matmul ins(%[[UNSET_ENCODING]],
+//       CHECK:   return %[[DISPATCH1]]
