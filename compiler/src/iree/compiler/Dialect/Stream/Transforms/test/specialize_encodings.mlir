@@ -1027,3 +1027,34 @@ util.func public @dispatch_hal_executable_with_encodings(%arg0: !stream.resource
   util.return %0 : !stream.resource<*>
 }
 // CHECK-LABEL: util.func public @dispatch_hal_executable_with_encodings(
+
+// -----
+
+// Check specialization of pad encoding.
+
+util.global private @__device_0 = #hal.device.target<"hip", [#hal.executable.target<"rocm", "rocm-hsaco-fb", {iree.encoding.resolver = #iree_gpu.gpu_pad_layout<>}>]>
+stream.executable private @dispatch_0 {
+  stream.executable.export public @dispatch_0 workgroups() -> (index, index, index) {
+    %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice
+    stream.return %x, %y, %z : index, index, index
+  }
+  builtin.module {
+    func.func @dispatch_0(%arg0 : index, %arg1 : !stream.binding) {
+      %c0 = arith.constant 0 : index
+      %0 = tensor.empty(%arg0) : tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>
+      %1 =  stream.binding.subspan %arg1[%c0]
+          : !stream.binding ->
+            !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>>{%arg0}
+      iree_tensor_ext.dispatch.tensor.store %0, %1, offsets = [0, 0], sizes = [%arg0, 2048], strides = [1, 1]
+          : tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>> -> 
+            !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>>{%arg0}
+      return
+    }
+  }
+}
+util.func @test(%arg0 : index) {
+  %0 = stream.tensor.sizeof on(#hal.device.affinity<@__device_0>) tensor<?x2048xf32>{%arg0} : index
+  %1 = stream.tensor.dispatch on(#hal.device.affinity<@__device_0>) @dispatch_0::@dispatch_0[](%arg0)
+      : (index) -> tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>{%arg0} in !stream.resource<*>{%0}
+  util.return
+}
