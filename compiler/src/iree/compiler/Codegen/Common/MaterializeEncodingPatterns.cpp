@@ -755,7 +755,6 @@ struct UnsetEncodingOpLoweringConversion
                   ConversionPatternRewriter &rewriter) const override {
     auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
         getTypeConverter());
-
     MaterializeEncodingInfo encodingInfo =
         converter->getEncodingInfo(unsetEncodingOp.getSource().getType());
     if (IREE::Codegen::isIdentityLayout(encodingInfo)) {
