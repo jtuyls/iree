@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "iree/compiler/Dialect/TensorExt/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
@@ -165,6 +166,8 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   //----------------------------------------------------------------------------
 
   // Specialize the encodings before the lowering of stream tensor ops.
+  // passManager.addPass(IREE::Stream::createSpecializeEncodingsPass());
+  // passManager.addPass(IREE::Stream::createFuseCollapseIntoStorePass());
   passManager.addPass(IREE::Stream::createSpecializeEncodingsPass());
 
   // Lower stream.tensor.* ops to stream.async.* ops based on
