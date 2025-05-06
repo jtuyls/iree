@@ -115,9 +115,12 @@ static Type getTypeWithResolvedEncodingLayouts(
     if (!layout) {
       return nullptr;
     }
+    LLVM_DEBUG(llvm::dbgs() << "layout: " << layout << "\n");
     layouts.push_back(layout);
   }
+  LLVM_DEBUG(llvm::dbgs() << "encodingAttr: " << encodingAttr << "\n");
   Attribute newEncoding = encodingAttr.cloneWithLayouts(layouts);
+  LLVM_DEBUG(llvm::dbgs() << "newEncoding: " << newEncoding << "\n");
   assert(isa<IREE::Encoding::SerializableEncodingAttrInterface>(newEncoding));
   return rankedTensorType.cloneWithEncoding(newEncoding);
 };

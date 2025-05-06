@@ -28,6 +28,7 @@
 #include "iree/compiler/Codegen/ExternalInterfaces/GPUEncodingExternalModels.h"
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/Utils/Utils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/GPUTileSwizzleUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
@@ -531,6 +532,7 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
 } // namespace
 
 void registerGPUEncodingExternalModels(DialectRegistry &registry) {
+  // registry.insert<IREE::Codegen::IREECodegenDialect>();
   registry.addExtension(
       +[](MLIRContext *ctx, IREE::GPU::IREEGPUDialect *dialect) {
         IREE::GPU::GPUEncodingLayoutAttr::attachInterface<
@@ -538,6 +540,7 @@ void registerGPUEncodingExternalModels(DialectRegistry &registry) {
             GPUDeviceEncodingLayoutAttrInterface,
             GPUHostEncodingLayoutResolverAttrInterface,
             GPUHostSerializableEncodingAttrInterface>(*ctx);
+        ctx->getOrLoadDialect<IREE::Codegen::IREECodegenDialect>();
         IREE::GPU::GPUPadLayoutAttr::attachInterface<
             GPUPadDeviceEncodingLayoutAttrInterface,
             GPUPadEncodingLayoutResolverAttrInterface>(*ctx);

@@ -19,6 +19,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -98,6 +99,8 @@ struct MaterializePadEncodingTypeConverter final
     });
     addConversion([&](IREE::TensorExt::DispatchTensorType dispatchTensorType)
                       -> IREE::TensorExt::DispatchTensorType {
+      LLVM_DEBUG(llvm::dbgs() << "addConversion DispatchTensorType: "
+                              << dispatchTensorType << "\n");
       auto type = dyn_cast<RankedTensorType>(dispatchTensorType.getBoundType());
       if (!type || !type.getEncoding()) {
         return dispatchTensorType;
@@ -107,6 +110,8 @@ struct MaterializePadEncodingTypeConverter final
       if (getPadLayout(getLayoutAttr(), type)) {
         type = getPaddedType(getLayoutAttr(), type);
       }
+
+      LLVM_DEBUG(llvm::dbgs() << "addConversion return\n");
       return IREE::TensorExt::DispatchTensorType::get(
           dispatchTensorType.getAccess(), type);
     });
@@ -130,9 +135,11 @@ struct MaterializeFlowDispatchTensorLoadOp final
   matchAndRewrite(IREE::TensorExt::DispatchTensorLoadOp loadOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs() << "LOAD: " << loadOp << "\n");
     // Only handle operations where the load covers the entire
     // `!iree_tensor_ext.dispatch.tensor` type.
     if (!loadOp.isLoadOfWholeSource()) {
+      LLVM_DEBUG(llvm::dbgs() << "LOAD unhandled partial stores\n");
       return rewriter.notifyMatchFailure(loadOp, "unhandled partial loads");
     }
 
@@ -142,6 +149,7 @@ struct MaterializeFlowDispatchTensorLoadOp final
     auto boundTensorType = cast<RankedTensorType>(sourceType.getBoundType());
     if (!typeConverter.hasNonZeroPadding(boundTensorType)) {
       // Let the Nop pattern handle this.
+      LLVM_DEBUG(llvm::dbgs() << "LOAD no padding applied\n");
       return rewriter.notifyMatchFailure(loadOp, "no padding applied");
     }
 
@@ -156,20 +164,23 @@ struct MaterializeFlowDispatchTensorLoadOp final
                                          rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> newStrides(newMixedSizes.size(),
                                          rewriter.getIndexAttr(1));
-    SmallVector<int64_t> newStaticDims;
-    SmallVector<Value> newDynamicDims;
-    dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
+    // SmallVector<int64_t> newStaticDims;
+    // SmallVector<Value> newDynamicDims;
+    // dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
 
     Location loc = loadOp.getLoc();
-    Value newLoad = rewriter.create<IREE::TensorExt::DispatchTensorLoadOp>(
-        loc, adaptor.getSource(), newDynamicDims, newOffsets, newMixedSizes,
-        newStrides);
+    // Value newLoad = rewriter.create<IREE::TensorExt::DispatchTensorLoadOp>(
+    //     loc, adaptor.getSource(), newDynamicDims, newOffsets, newMixedSizes,
+    //     newStrides);
     auto extractType = RankedTensorType::get(boundTensorType.getShape(),
                                              boundTensorType.getElementType());
     SmallVector<OpFoldResult> extractSizes = getMixedValues(
         boundTensorType.getShape(), loadOp.getSourceDims(), rewriter);
-    rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
-        loadOp, extractType, newLoad, newOffsets, extractSizes, newStrides);
+    // rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+    //     loadOp, extractType, newLoad, newOffsets, extractSizes, newStrides);
+    rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorLoadOp>(
+        loadOp, adaptor.getSource(), loadOp.getSourceDims(), newOffsets,
+        extractSizes, newStrides);
     return success();
   }
 };
@@ -186,11 +197,13 @@ struct MaterializeFlowDispatchTensorStoreOp final
   matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs() << "STORE: " << storeOp << "\n");
     // Only handle operations where the store covers the entire
     // `!iree_tensor_ext.dispatch.tensor` type.
-    if (!storeOp.isStoreToWholeTarget()) {
-      return rewriter.notifyMatchFailure(storeOp, "unhandled partial stores");
-    }
+    // if (!storeOp.isStoreToWholeTarget()) {
+    //   LLVM_DEBUG(llvm::dbgs() << "STORE unhandled partial stores\n");
+    //   return rewriter.notifyMatchFailure(storeOp, "unhandled partial stores");
+    // }
 
     auto &typeConverter =
         *getTypeConverter<MaterializePadEncodingTypeConverter>();
@@ -198,6 +211,7 @@ struct MaterializeFlowDispatchTensorStoreOp final
     auto boundTensorType = cast<RankedTensorType>(targetType.getBoundType());
     if (!typeConverter.hasNonZeroPadding(boundTensorType)) {
       // Let the Nop pattern handle this.
+      LLVM_DEBUG(llvm::dbgs() << "STORE no padding applied\n");
       return rewriter.notifyMatchFailure(storeOp, "no padding applied");
     }
 
@@ -207,9 +221,10 @@ struct MaterializeFlowDispatchTensorStoreOp final
     RankedTensorType paddedType = newTargetType.asRankedTensorType();
 
     Location loc = storeOp.getLoc();
-    SmallVector<Value> dynamicResultSizes{storeOp->getOperands()};
-    Value empty =
-        rewriter.create<tensor::EmptyOp>(loc, paddedType, dynamicResultSizes);
+    // SmallVector<Value> dynamicResultSizes{adaptor.getOperands()};
+    // Value empty =
+    //     rewriter.create<tensor::EmptyOp>(loc, paddedType,
+    //     dynamicResultSizes);
 
     SmallVector<OpFoldResult> offsets(paddedType.getRank(),
                                       rewriter.getIndexAttr(0));
@@ -217,18 +232,21 @@ struct MaterializeFlowDispatchTensorStoreOp final
                                       rewriter.getIndexAttr(1));
     SmallVector<OpFoldResult> sizes =
         tensor::getMixedSizes(rewriter, loc, adaptor.getValue());
-    Value insertOp = rewriter.create<tensor::InsertSliceOp>(
-        loc, adaptor.getValue(), empty, offsets, sizes, strides);
+    // Value insertOp = rewriter.create<tensor::InsertSliceOp>(
+    //     loc, adaptor.getValue(), empty, offsets, sizes, strides);
 
-    SmallVector<OpFoldResult> newMixedSizes = getMixedValues(
-        paddedType.getShape(), storeOp.getTargetDims(), rewriter);
-    SmallVector<int64_t> newStaticDims;
-    SmallVector<Value> newDynamicDims;
-    dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
+    // SmallVector<OpFoldResult> newMixedSizes = getMixedValues(
+    //     paddedType.getShape(), storeOp.getTargetDims(), rewriter);
+    // SmallVector<int64_t> newStaticDims;
+    // SmallVector<Value> newDynamicDims;
+    // dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
 
+    // rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
+    //     storeOp, insertOp, adaptor.getTarget(), newDynamicDims, offsets,
+    //     newMixedSizes, strides);
     rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
-        storeOp, insertOp, adaptor.getTarget(), newDynamicDims, offsets,
-        newMixedSizes, strides);
+        storeOp, adaptor.getValue(), adaptor.getTarget(),
+        adaptor.getTargetDims(), offsets, sizes, strides);
     return success();
   }
 };
@@ -247,19 +265,142 @@ struct MaterializeInterfaceBindingEncoding final
   matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp subspanOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs()
+               << "MaterializeInterfaceBindingEncoding: " << subspanOp << "\n");
     auto resultType = dyn_cast<IREE::TensorExt::DispatchTensorType>(
         subspanOp.getResult().getType());
     if (!resultType) {
+      LLVM_DEBUG(
+          llvm::dbgs()
+          << "expected result type to be !iree_tensor_ext.dispatch.tensor\n");
       return rewriter.notifyMatchFailure(
           subspanOp,
           "expected result type to be !iree_tensor_ext.dispatch.tensor");
     }
+    LLVM_DEBUG(llvm::dbgs() << "--convertType\n");
     auto newResultType = getTypeConverter()->convertType(resultType);
+    LLVM_DEBUG(llvm::dbgs() << "--newResultType: " << newResultType << "\n");
     SmallVector<Value> newDynamicDims = subspanOp.getDynamicDims();
     rewriter.replaceOpWithNewOp<IREE::HAL::InterfaceBindingSubspanOp>(
         subspanOp, newResultType, subspanOp.getLayout(), subspanOp.getBinding(),
         subspanOp.getByteOffset(), newDynamicDims, subspanOp.getAlignmentAttr(),
         subspanOp.getDescriptorFlagsAttr());
+    LLVM_DEBUG(llvm::dbgs() << "--success\n");
+    return success();
+  }
+};
+
+struct FuseCollapseIntoTensorStoreOp
+    : public OpRewritePattern<IREE::TensorExt::DispatchTensorStoreOp> {
+  using OpRewritePattern<
+      IREE::TensorExt::DispatchTensorStoreOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
+                  PatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs() << "FuseCollapseIntoTensorStoreOp: " << storeOp << "\n");
+    if (!storeOp.isStoreToWholeTarget()) {
+      return rewriter.notifyMatchFailure(storeOp, "unhandled partial stores");
+    }
+    auto collapseOp = dyn_cast_if_present<tensor::CollapseShapeOp>(storeOp.getValue().getDefiningOp());
+    if (!collapseOp) {
+      return rewriter.notifyMatchFailure(storeOp, "expected `tensor.collapse_shape` source");
+    }
+    RankedTensorType srcType = collapseOp.getSrcType();
+    RankedTensorType collapseType = collapseOp.getResultType();
+    SmallVector<ReassociationIndices, 4> reassociationMaps =
+              collapseOp.getReassociationIndices();
+
+    auto subspanOp = dyn_cast_if_present<IREE::HAL::InterfaceBindingSubspanOp>(storeOp.getTarget().getDefiningOp());
+    if (!subspanOp) {
+      return rewriter.notifyMatchFailure(storeOp, "expected `hal.interface.binding.subspan` target");
+    }
+    auto resultType = dyn_cast<IREE::TensorExt::DispatchTensorType>(
+      subspanOp.getResult().getType());
+    if (!resultType) {
+      LLVM_DEBUG(
+          llvm::dbgs()
+          << "expected result type to be !iree_tensor_ext.dispatch.tensor\n");
+      return rewriter.notifyMatchFailure(
+          subspanOp,
+          "expected result type to be !iree_tensor_ext.dispatch.tensor");
+    }
+
+    Location loc = storeOp.getLoc();
+    rewriter.setInsertionPoint(subspanOp);
+    ArrayRef<int64_t> srcShape = srcType.getShape();
+    ArrayRef<int64_t> resultShape = resultType.getShape();
+    
+    auto newResultType = IREE::TensorExt::DispatchTensorType::get(
+      resultType.getAccess(), srcType);
+    LLVM_DEBUG(llvm::dbgs() << "--newResultType: " << newResultType << "\n");
+    SmallVector<Value> dynamicDims = subspanOp.getDynamicDims();
+    LLVM_DEBUG(llvm::dbgs() << "--dynamicDims: " << dynamicDims.size() << "\n");
+    SmallVector<Value> newSubspanDynamicDims;
+    size_t dynIndex = 0;
+    for (auto [i, dim] : llvm::enumerate(resultShape)) {
+      if (!ShapedType::isDynamic(dim)) continue;
+      ReassociationIndices reassoc = reassociationMaps[i];
+      int64_t staticVal = 1;
+      bool foundDynamic = false;
+      for (int64_t reassocIndex : reassoc) {
+        int64_t srcDim = srcShape[reassocIndex];
+        if (ShapedType::isDynamic(srcDim)) {
+          if (foundDynamic) return failure();
+          foundDynamic = true;
+        } else {
+          staticVal *= srcDim;
+        }
+      }
+      AffineExpr result = rewriter.getAffineDimExpr(0).floorDiv(rewriter.getAffineConstantExpr(staticVal));
+      AffineMap map = AffineMap::get(1, 0, result);
+      
+      auto newDynamicDim = rewriter.create<mlir::affine::AffineApplyOp>(
+        loc, map, ValueRange{dynamicDims[dynIndex]});
+      newSubspanDynamicDims.push_back(newDynamicDim);
+      dynIndex++;
+    }
+    rewriter.replaceOpWithNewOp<IREE::HAL::InterfaceBindingSubspanOp>(
+        subspanOp, newResultType, subspanOp.getLayout(), subspanOp.getBinding(),
+        subspanOp.getByteOffset(), newSubspanDynamicDims, subspanOp.getAlignmentAttr(),
+        subspanOp.getDescriptorFlagsAttr());
+    // LLVM_DEBUG(llvm::dbgs() << "--success\n");
+    
+    LLVM_DEBUG(llvm::dbgs() << "BEFORE EXPAND\n");
+    rewriter.setInsertionPoint(storeOp);
+
+    
+    // IREE::TensorExt::DispatchTensorType targetType = storeOp.getTargetType();
+    // auto expandShapeType = IREE::TensorExt::DispatchTensorType::get(
+    //   targetType.getAccess(), srcType);
+    // auto expandShape = rewriter.create<tensor::ExpandShapeOp>(
+    //   loc, expandShapeType, storeOp.getTarget(), reassociationMaps);
+
+    // LLVM_DEBUG(llvm::dbgs() << "BEFORE OFFSETS\n");
+
+    SmallVector<OpFoldResult> newOffsets(srcType.getRank(), rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> newStrides(srcType.getRank(), rewriter.getIndexAttr(1));
+    // SmallVector<OpFoldResult> newMixedSizes =
+    //     tensor::getMixedSizes(rewriter, loc, collapseOp.getSrc());
+    SmallVector<OpFoldResult> newMixedSizes;
+    size_t dynSizeIndex = 0;
+    for (int64_t dim : srcShape) {
+      if (ShapedType::isDynamic(dim)) {
+        newMixedSizes.push_back(newSubspanDynamicDims[dynSizeIndex]);
+        dynSizeIndex++;
+      } else {
+        newMixedSizes.push_back(rewriter.getIndexAttr(dim));
+      }
+    }
+    LLVM_DEBUG(llvm::dbgs() << "newMixedSizes: " << newMixedSizes.size() << "\n");
+    SmallVector<int64_t> newStaticDims;
+    SmallVector<Value> newDynamicDims;
+    dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
+    rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
+        storeOp, collapseOp.getSrc(), storeOp.getTarget(), newDynamicDims,
+        newOffsets, newMixedSizes, newStrides);
+    collapseOp->dropAllUses();
+    rewriter.eraseOp(collapseOp);
     return success();
   }
 };
@@ -276,6 +417,17 @@ struct MaterializeEncodingIntoPaddingPass final
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     FunctionOpInterface operation = getOperation();
+
+    {
+      LLVM_DEBUG(llvm::dbgs() << "REWRITE FuseCollapseIntoTensorStoreOp\n");
+      RewritePatternSet patterns(context);
+      patterns.add<FuseCollapseIntoTensorStoreOp>(context);
+      if (failed(applyPatternsGreedily(operation, std::move(patterns)))) {
+        return signalPassFailure();
+      }
+    }
+
+    LLVM_DEBUG(llvm::dbgs() << "AFTER FuseCollapseIntoTensorStoreOp: " << operation << "\n");
 
     // Retrieve the config from executable target attribute, if any. Otherwise,
     // retrieve the config from CLI GPU target and construct a virtual
@@ -329,6 +481,7 @@ struct MaterializeEncodingIntoPaddingPass final
 
     if (failed(applyPartialConversion(operation, target,
                                       std::move(materializeEncodingPattern)))) {
+      LLVM_DEBUG(llvm::dbgs() << "AFTER conversion: " << operation << "\n");
       operation.emitOpError("materialization failed");
       return signalPassFailure();
     }
