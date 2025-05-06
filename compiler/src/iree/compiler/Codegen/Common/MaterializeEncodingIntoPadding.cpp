@@ -207,7 +207,7 @@ struct MaterializeFlowDispatchTensorStoreOp final
     RankedTensorType paddedType = newTargetType.asRankedTensorType();
 
     Location loc = storeOp.getLoc();
-    SmallVector<Value> dynamicResultSizes{storeOp->getOperands()};
+    SmallVector<Value> dynamicResultSizes{adaptor.getOperands()};
     Value empty =
         rewriter.create<tensor::EmptyOp>(loc, paddedType, dynamicResultSizes);
 
@@ -250,6 +250,9 @@ struct MaterializeInterfaceBindingEncoding final
     auto resultType = dyn_cast<IREE::TensorExt::DispatchTensorType>(
         subspanOp.getResult().getType());
     if (!resultType) {
+      LLVM_DEBUG(
+          llvm::dbgs()
+          << "expected result type to be !iree_tensor_ext.dispatch.tensor\n");
       return rewriter.notifyMatchFailure(
           subspanOp,
           "expected result type to be !iree_tensor_ext.dispatch.tensor");
