@@ -348,3 +348,35 @@ func.func @load_from_padded_and_mmt_using_matmul_k() {
 //
 // CHECK:         iree_tensor_ext.dispatch.tensor.store %[[MMT]], %[[C]], offsets = [0, 0], sizes = [2048, 2048], strides = [1, 1]
 // CHECK-SAME:                  tensor<2048x2048xf16> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<2048x2048xf16>>
+
+// -----
+
+func.func @materialize_pad_encoding_on_partial_dynamic_shape() {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c0 = arith.constant 0 : index
+  %0 = hal.interface.constant.load layout(<constants = 2, bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>) ordinal(0) : i64
+  %6 = arith.index_castui %0 : i64 to index
+  %7 = util.assume.int %6<umin = 0, umax = 9007199254740991> : index
+  %8 = hal.interface.binding.subspan layout(<constants = 2, bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>) binding(1) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<4096x2048xf32>>
+  %9 = iree_tensor_ext.dispatch.workload.ordinal %7, 0 : index
+  %10 = hal.interface.binding.subspan layout(<constants = 2, bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x2048xf32, #iree_encoding.layout<[#iree_encoding.pad_encoding_layout<[0, 32]>]>>>{%9}
+  %11 = hal.interface.binding.subspan layout(<constants = 2, bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>) binding(2) alignment(64) offset(%c0) flags(Indirect) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x4096xf32>>{%9}
+  %12 = iree_tensor_ext.dispatch.tensor.load %10, offsets = [0, 0], sizes = [%9, 2048], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x2048xf32, #iree_encoding.layout<[#iree_encoding.pad_encoding_layout<[0, 32]>]>>>{%9} -> tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>
+  %13 = iree_tensor_ext.dispatch.tensor.load %8, offsets = [0, 0], sizes = [4096, 2048], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<4096x2048xf32>> -> tensor<4096x2048xf32>
+  %14 = tensor.empty(%9) : tensor<?x4096xf32>
+  %15 = linalg.fill ins(%cst : f32) outs(%14 : tensor<?x4096xf32>) -> tensor<?x4096xf32>
+  %16 = iree_encoding.unset_encoding %12 : tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>> -> tensor<?x2048xf32>{%9}
+  %17 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = ["parallel", "parallel", "reduction"]} ins(%16, %13 : tensor<?x2048xf32>, tensor<4096x2048xf32>) outs(%15 : tensor<?x4096xf32>) {
+  ^bb0(%in: f32, %in_0: f32, %out: f32):
+    %18 = arith.mulf %in, %in_0 : f32
+    %19 = arith.addf %out, %18 : f32
+    linalg.yield %19 : f32
+  } -> tensor<?x4096xf32>
+  iree_tensor_ext.dispatch.tensor.store %17, %11, offsets = [0, 0], sizes = [%9, 4096], strides = [1, 1] : tensor<?x4096xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x4096xf32>>{%9}
+  return
+}
+// CHECK-LABEL: @materialize_pad_encoding_on_partial_dynamic_shape
+// CHECK:         %[[A:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(0)
+// CHECK-SAME:      !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x2080xf32>>
+// CHECK:         iree_tensor_ext.dispatch.tensor.load %[[A]], offsets = [0, 0], sizes = [%{{.+}}, 2048], strides = [1, 1]
+// CHECK-SAME:      !iree_tensor_ext.dispatch.tensor<readonly:tensor<?x2080xf32>>{%{{.+}}} -> tensor<?x2048xf32>
