@@ -697,10 +697,10 @@ struct SetEncodingOpLoweringConversion
     LLVM_DEBUG(llvm::dbgs() << "SetEncodingOpLoweringConversion: " << encodingOp << "\n");
     auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
         getTypeConverter());
-    RankedTensorType resultType = encodingOp.getResultType();
-    if (resultType && isa_and_nonnull<PadEncodingLayoutAttr>(resultType.getEncoding())) {
-      return dispatchTensorType;
-    }
+    // RankedTensorType resultType = encodingOp.getResultType();
+    // if (resultType && isa_and_nonnull<PadEncodingLayoutAttr>(resultType.getEncoding())) {
+    //   return dispatchTensorType;
+    // }
 
     auto packedValue = lowerSetEncodingOpToPackOp(
         rewriter, encodingOp, adaptor.getSource(), *converter);
