@@ -663,7 +663,7 @@ util.func public @multi_device_set_encoding(%arg0: !stream.resource<external>, %
   util.return
 }
 
-// CHECK-DAG:   #[[DEVICE_A_ENCODING:.+]] = #iree_encoding.testing_encoding<[#iree_encoding.specialized_encoding<123, tensor<?x?xf32>>]>
+// CHECK-DAG:   #[[DEVICE_A_ENCODING:.+]] = #iree_encoding2.testing_encoding<[#iree_encoding.specialized_encoding<123, tensor<?x?xf32>>]>
 // CHECK-DAG:   #[[DEVICE_B_ENCODING:.+]] = #iree_encoding.testing_encoding<[#iree_encoding.specialized_encoding<456, tensor<?x?xf32>>]>
 // CHECK-DAG:   #[[ORIG_ENCODING:.+]] = #iree_encoding.testing_encoding<>
 // CHECK-DAG:   #[[DEVICE_LOCAL_0:.+]] = #hal.device.target
@@ -1032,7 +1032,19 @@ util.func public @dispatch_hal_executable_with_encodings(%arg0: !stream.resource
 
 // Check specialization of pad encoding.
 
-util.global private @__device_0 = #hal.device.target<"hip", [#hal.executable.target<"rocm", "rocm-hsaco-fb", {iree.encoding.resolver = #iree_gpu.gpu_pad_layout<>}>]>
+util.global private @__device_0 = #hal.device.target<"hip", [#hal.executable.target<"rocm", "rocm-hsaco-fb", {iree.encoding.resolver = #iree_gpu.gpu_pad_layout<>,
+iree.gpu.target = #iree_gpu.target<arch = "gfx942",
+                                     features = "",
+                                     wgp = <compute = fp32,
+                                            storage =  b32,
+                                            subgroup =  none,
+                                            dot =  none,
+                                            mma = [<MFMA_F32_16x16x4_F32>],
+                                            subgroup_size_choices = [64],
+                                            max_workgroup_sizes = [1024, 1024, 1024],
+                                            max_thread_count_per_workgroup = 1024,
+                                            max_workgroup_memory_bytes = 65536,
+                                            max_workgroup_counts = [2147483647, 2147483647, 2147483647]>>}>]>
 stream.executable private @dispatch_0 {
   stream.executable.export public @dispatch_0 workgroups() -> (index, index, index) {
     %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice
@@ -1056,5 +1068,22 @@ util.func @test(%arg0 : index) {
   %0 = stream.tensor.sizeof on(#hal.device.affinity<@__device_0>) tensor<?x2048xf32>{%arg0} : index
   %1 = stream.tensor.dispatch on(#hal.device.affinity<@__device_0>) @dispatch_0::@dispatch_0[](%arg0)
       : (index) -> tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>{%arg0} in !stream.resource<*>{%0}
+  util.return
+}
+
+// -----
+
+// Creates an nop encoding if iree_encoding.nop is used.
+
+#map0 = affine_map<(m, n, k) -> (m, k)>
+#map1 = affine_map<(m, n, k) -> (n, k)>
+#map2 = affine_map<(m, n, k) -> (m, n)>
+#executable_target_vmvx_bytecode_fb = #hal.executable.target<"vmvx", "vmvx-bytecode-fb", { iree.encoding.resolver = #iree_gpu.gpu_pad_layout<> }>
+#device_target_local_0_ = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target_vmvx_bytecode_fb]> : !hal.device
+#encoding = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f16, f16, f32], user_indexing_maps = [#map0, #map1, #map2]>
+
+util.global private @device_a = #device_target_local_0_
+util.func public @ignore_encoding_by_identity_encoding(%arg0: index, %arg1: index, %scalar_f32 : f32) {
+  %0 = stream.tensor.empty on(#hal.device.affinity<@device_a>) : tensor<?x0xf32, #encoding>{%arg0} in !stream.resource<*>{%arg1}
   util.return
 }
