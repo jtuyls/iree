@@ -98,6 +98,7 @@ struct MaterializePadEncodingTypeConverter final
     });
     addConversion([&](IREE::TensorExt::DispatchTensorType dispatchTensorType)
                       -> IREE::TensorExt::DispatchTensorType {
+      LLVM_DEBUG(llvm::dbgs() << "addConversion DispatchTensorType: " << dispatchTensorType << "\n");
       auto type = dyn_cast<RankedTensorType>(dispatchTensorType.getBoundType());
       if (!type || !type.getEncoding()) {
         return dispatchTensorType;
@@ -107,6 +108,8 @@ struct MaterializePadEncodingTypeConverter final
       if (getPadLayout(getLayoutAttr(), type)) {
         type = getPaddedType(getLayoutAttr(), type);
       }
+
+      LLVM_DEBUG(llvm::dbgs() << "addConversion return\n");
       return IREE::TensorExt::DispatchTensorType::get(
           dispatchTensorType.getAccess(), type);
     });
@@ -130,9 +133,11 @@ struct MaterializeFlowDispatchTensorLoadOp final
   matchAndRewrite(IREE::TensorExt::DispatchTensorLoadOp loadOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+                    LLVM_DEBUG(llvm::dbgs() << "LOAD: " << loadOp << "\n");
     // Only handle operations where the load covers the entire
     // `!iree_tensor_ext.dispatch.tensor` type.
     if (!loadOp.isLoadOfWholeSource()) {
+      LLVM_DEBUG(llvm::dbgs() << "LOAD unhandled partial stores\n");
       return rewriter.notifyMatchFailure(loadOp, "unhandled partial loads");
     }
 
@@ -142,6 +147,7 @@ struct MaterializeFlowDispatchTensorLoadOp final
     auto boundTensorType = cast<RankedTensorType>(sourceType.getBoundType());
     if (!typeConverter.hasNonZeroPadding(boundTensorType)) {
       // Let the Nop pattern handle this.
+      LLVM_DEBUG(llvm::dbgs() << "LOAD no padding applied\n");
       return rewriter.notifyMatchFailure(loadOp, "no padding applied");
     }
 
@@ -186,9 +192,11 @@ struct MaterializeFlowDispatchTensorStoreOp final
   matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+                    LLVM_DEBUG(llvm::dbgs() << "STORE: " << storeOp << "\n");
     // Only handle operations where the store covers the entire
     // `!iree_tensor_ext.dispatch.tensor` type.
     if (!storeOp.isStoreToWholeTarget()) {
+      LLVM_DEBUG(llvm::dbgs() << "STORE unhandled partial stores\n");
       return rewriter.notifyMatchFailure(storeOp, "unhandled partial stores");
     }
 
@@ -198,6 +206,7 @@ struct MaterializeFlowDispatchTensorStoreOp final
     auto boundTensorType = cast<RankedTensorType>(targetType.getBoundType());
     if (!typeConverter.hasNonZeroPadding(boundTensorType)) {
       // Let the Nop pattern handle this.
+      LLVM_DEBUG(llvm::dbgs() << "STORE no padding applied\n");
       return rewriter.notifyMatchFailure(storeOp, "no padding applied");
     }
 
@@ -247,19 +256,24 @@ struct MaterializeInterfaceBindingEncoding final
   matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp subspanOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+                    LLVM_DEBUG(llvm::dbgs() << "MaterializeInterfaceBindingEncoding: " << subspanOp << "\n");
     auto resultType = dyn_cast<IREE::TensorExt::DispatchTensorType>(
         subspanOp.getResult().getType());
     if (!resultType) {
+      LLVM_DEBUG(llvm::dbgs() << "expected result type to be !iree_tensor_ext.dispatch.tensor\n");
       return rewriter.notifyMatchFailure(
           subspanOp,
           "expected result type to be !iree_tensor_ext.dispatch.tensor");
     }
+    LLVM_DEBUG(llvm::dbgs() << "--convertType\n");
     auto newResultType = getTypeConverter()->convertType(resultType);
+    LLVM_DEBUG(llvm::dbgs() << "--newResultType: " << newResultType << "\n");
     SmallVector<Value> newDynamicDims = subspanOp.getDynamicDims();
     rewriter.replaceOpWithNewOp<IREE::HAL::InterfaceBindingSubspanOp>(
         subspanOp, newResultType, subspanOp.getLayout(), subspanOp.getBinding(),
         subspanOp.getByteOffset(), newDynamicDims, subspanOp.getAlignmentAttr(),
         subspanOp.getDescriptorFlagsAttr());
+        LLVM_DEBUG(llvm::dbgs() << "--success\n");
     return success();
   }
 };
@@ -329,6 +343,7 @@ struct MaterializeEncodingIntoPaddingPass final
 
     if (failed(applyPartialConversion(operation, target,
                                       std::move(materializeEncodingPattern)))) {
+      LLVM_DEBUG(llvm::dbgs() << "AFTER conversion: " << operation << "\n");
       operation.emitOpError("materialization failed");
       return signalPassFailure();
     }
