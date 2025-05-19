@@ -217,8 +217,8 @@ struct MaterializeFlowDispatchTensorStoreOp final
 
     Location loc = storeOp.getLoc();
     SmallVector<Value> dynamicResultSizes{storeOp->getOperands()};
-    Value empty =
-        rewriter.create<tensor::EmptyOp>(loc, paddedType, dynamicResultSizes);
+    // Value empty =
+    //     rewriter.create<tensor::EmptyOp>(loc, paddedType, dynamicResultSizes);
 
     SmallVector<OpFoldResult> offsets(paddedType.getRank(),
                                       rewriter.getIndexAttr(0));
@@ -226,18 +226,21 @@ struct MaterializeFlowDispatchTensorStoreOp final
                                       rewriter.getIndexAttr(1));
     SmallVector<OpFoldResult> sizes =
         tensor::getMixedSizes(rewriter, loc, adaptor.getValue());
-    Value insertOp = rewriter.create<tensor::InsertSliceOp>(
-        loc, adaptor.getValue(), empty, offsets, sizes, strides);
+    // Value insertOp = rewriter.create<tensor::InsertSliceOp>(
+    //     loc, adaptor.getValue(), empty, offsets, sizes, strides);
 
-    SmallVector<OpFoldResult> newMixedSizes = getMixedValues(
-        paddedType.getShape(), storeOp.getTargetDims(), rewriter);
-    SmallVector<int64_t> newStaticDims;
-    SmallVector<Value> newDynamicDims;
-    dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
+    // SmallVector<OpFoldResult> newMixedSizes = getMixedValues(
+    //     paddedType.getShape(), storeOp.getTargetDims(), rewriter);
+    // SmallVector<int64_t> newStaticDims;
+    // SmallVector<Value> newDynamicDims;
+    // dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
 
+    // rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
+    //     storeOp, insertOp, adaptor.getTarget(), newDynamicDims, offsets,
+    //     newMixedSizes, strides);
     rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
-        storeOp, insertOp, adaptor.getTarget(), newDynamicDims, offsets,
-        newMixedSizes, strides);
+          storeOp, adaptor.getValue(), adaptor.getTarget(), adaptor.getTargetDims(), offsets,
+          sizes, strides);
     return success();
   }
 };
