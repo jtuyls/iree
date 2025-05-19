@@ -15,6 +15,7 @@
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -309,6 +310,54 @@ struct FoldFillWithSetEncoding final
 //===---------------------------------------------------------------------===//
 // Set padding encodings
 //===---------------------------------------------------------------------===//
+static std::optional<IREE::Flow::DispatchRegionOp>
+getProducerDispatchRegionOp(Value operand) {
+  auto operandType = dyn_cast<RankedTensorType>(operand.getType());
+  if (!operandType || operandType.getRank() == 0) {
+    return std::nullopt;
+  }
+
+  SmallVector<Operation *> opChain;
+  auto producerValue = dyn_cast<OpResult>(operand);
+  while (producerValue &&
+         !isa<IREE::Flow::DispatchRegionOp>(producerValue.getOwner())) {
+    if (!llvm::hasSingleElement(producerValue.getUses())) {
+      return std::nullopt;
+    }
+
+    // If it is an operation that we want to look past, add it to the chain
+    // and update the `producerValue`.
+    Operation *currOperation = producerValue.getOwner();
+    if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp>(currOperation)) {
+      opChain.push_back(currOperation);
+      producerValue = dyn_cast<OpResult>(currOperation->getOperand(0));
+      continue;
+    }
+
+    // Conservative, bail out.
+    return std::nullopt;
+  }
+
+  if (!producerValue) {
+    return std::nullopt;
+  }
+
+  auto producerDispatch =
+      dyn_cast<IREE::Flow::DispatchRegionOp>(producerValue.getOwner());
+  // TODO(MaheshRavishankar): Multi-result producer dispatches can be supported.
+  // Will require to move the consumer dispatch immediately after the producer
+  // instead of what is done below and move other operands of the consumer
+  // dispatch before the producer dispatch.
+  if (!producerDispatch ||
+      !llvm::hasSingleElement(producerDispatch.getBody()) ||
+      producerDispatch->getNumResults() != 1) {
+    return std::nullopt;
+  }
+  if (!llvm::hasSingleElement(producerValue.getUses())) {
+    return std::nullopt;
+  }
+  return producerDispatch;
+}
 
 struct PaddedValue {
   Value paddedValue;
@@ -479,8 +528,24 @@ static SmallVector<unsigned> padOperandsOfOp(RewriterBase &rewriter,
 // Return a list of operands to be padded for each `op`.
 SmallVector<unsigned> getOperandsToPad(Operation *op) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
-  if (!linalgOp || !linalg::isaContractionOpInterface(linalgOp)) {
+  if (!linalgOp || !linalg::isaContractionOpInterface(linalgOp) || isa<IREE::LinalgExt::AttentionOp>(op)) {
     return {};
+  }
+
+  SmallVector<int64_t> operandsNum = {0, 1};
+  for (int64_t operandNum : operandsNum) {
+    OpOperand &operand = op->getOpOperand(operandNum);
+    std::optional<IREE::Flow::DispatchRegionOp> regionOp = getProducerDispatchRegionOp(operand.get());
+    bool containsAttention = false;
+    if (regionOp.has_value()) {
+      regionOp->walk([&](IREE::LinalgExt::AttentionOp op) {
+        containsAttention = true;
+      });
+    }
+    if (containsAttention) {
+      llvm::outs() << "containsAttention!!\n";
+      return {};
+    }
   }
 
   // Bail out on matvec / vecmat and skinny matmul problems.
@@ -534,7 +599,30 @@ static LogicalResult setPaddingEncodings(MLIRContext *context,
   // Collect all operations whose operands can be padded.
   using OpListType =
       SmallVector<std::tuple<Operation *, SmallVector<unsigned>>>;
+  // SmallVector<IREE::Flow::DispatchRegionOp> dispatchRegionOps;
+  // funcOp.walk([&](IREE::Flow::DispatchRegionOp regionOp) {
+  //   bool containsAttention = false;
+  //   regionOp.walk([&](IREE::LinalgExt::AttentionOp op) {
+  //     containsAttention = true;
+  //   });
+  //   if (containsAttention) {
+  //     llvm::outs() << "containsAttention!!\n";
+  //     return WalkResult::advance();
+  //   }
+  //   dispatchRegionOps.push_back(regionOp);
+  //   return WalkResult::advance();
+  // });
+  // llvm::outs() << "dispatchRegionOps: " << dispatchRegionOps.size() << "\n";
   OpListType paddedOps;
+  // for (auto regionOp : dispatchRegionOps) {
+  //   regionOp.walk([&](Operation *op) {
+  //     SmallVector<unsigned> paddedOperands = getOperandsToPad(op);
+  //     if (paddedOperands.empty()) {
+  //       return;
+  //     }
+  //     paddedOps.emplace_back(std::tuple{op, std::move(paddedOperands)});
+  //   });
+  // }
   funcOp.walk([&](Operation *op) {
     SmallVector<unsigned> paddedOperands = getOperandsToPad(op);
     if (paddedOperands.empty()) {

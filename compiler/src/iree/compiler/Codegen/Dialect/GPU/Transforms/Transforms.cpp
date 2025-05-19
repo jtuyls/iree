@@ -399,6 +399,7 @@ collapseParallelInsertOp(RewriterBase &rewriter,
         llvm::map_to_vector(groupOffsets, [&](OpFoldResult ofr) {
           return getValueOrCreateConstantIndexOp(rewriter, loc, ofr);
         });
+    setInsertionPointAfterLastNeededValue(rewriter, subsetOp);
     OpFoldResult collapsedOffset =
         rewriter
             .create<affine::AffineLinearizeIndexOp>(loc, offsetVals, basis,
