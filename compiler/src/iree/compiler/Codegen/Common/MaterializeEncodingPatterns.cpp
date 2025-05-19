@@ -457,7 +457,7 @@ struct MaterializeInterfaceBindingEncoding
   matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp subspanOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    LLVM_DEBUG(llvm::dbgs() << "MaterializeInterfaceBindingEncoding: " << subspanOp << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "MaterializeInterfaceBindingEncoding1: " << subspanOp << "\n");
     auto resultType = llvm::dyn_cast<IREE::TensorExt::DispatchTensorType>(
         subspanOp.getResult().getType());
     if (!resultType) {
@@ -774,9 +774,20 @@ struct UnsetEncodingOpLoweringConversion
   matchAndRewrite(IREE::Encoding::UnsetEncodingOp unsetEncodingOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-                    LLVM_DEBUG(llvm::dbgs() << "UnsetEncodingOpLoweringConversion: " << unsetEncodingOp << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "UnsetEncodingOpLoweringConversion: " << unsetEncodingOp << "\n");
     auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
         getTypeConverter());
+    RankedTensorType sourceType = unsetEncodingOp.getSourceType();
+    if (sourceType && isa_and_nonnull<IREE::Encoding::PadEncodingLayoutAttr>(sourceType.getEncoding())) {
+      LLVM_DEBUG(llvm::dbgs() << "PadEncodingLayoutAttr\n");
+      rewriter.replaceOp(unsetEncodingOp, adaptor.getSource());
+      // Type targetType =
+      //     getTypeConverter()->convertType(encodingOp.getResultType());
+      // Value result = rewriter.createOrFold<tensor::CastOp>(
+      //     encodingOp.getLoc(), targetType, adaptor.getSource());
+      // rewriter.replaceOp(encodingOp, result);
+      return success();
+    }
 
     MaterializeEncodingInfo encodingInfo =
         converter->getEncodingInfo(unsetEncodingOp.getSource().getType());
@@ -895,7 +906,7 @@ void populateMaterializeEncodingPatterns(
         LLVM_DEBUG(llvm::dbgs() << "--equal: " << (resultType == convertedType) << "\n");
         return resultType == convertedType;
       });
-  target.addIllegalOp<IREE::Encoding::SetEncodingOp>();
+  target.addIllegalOp<IREE::Encoding::SetEncodingOp, IREE::Encoding::UnsetEncodingOp>();
   target.addDynamicallyLegalOp<IREE::TensorExt::DispatchTensorStoreOp>(
     [&typeConverter](IREE::TensorExt::DispatchTensorStoreOp storeOp) {
       LLVM_DEBUG(llvm::dbgs() << "addDynamicallyLegalOp STORE\n");
@@ -911,6 +922,21 @@ void populateMaterializeEncodingPatterns(
       LLVM_DEBUG(llvm::dbgs() << "--equal: " << (resultType == convertedType) << "\n");
       return resultType == convertedType;
     });
+    target.addDynamicallyLegalOp<IREE::TensorExt::DispatchTensorLoadOp>(
+      [&typeConverter](IREE::TensorExt::DispatchTensorLoadOp loadOp) {
+        LLVM_DEBUG(llvm::dbgs() << "addDynamicallyLegalOp LOAD\n");
+        auto resultType = llvm::dyn_cast<IREE::TensorExt::DispatchTensorType>(
+          loadOp.getSourceType());
+        LLVM_DEBUG(llvm::dbgs() << "--resultType: " << resultType << "\n");
+        // For types that are not `TensorExt::DispatchTensorType` mark as legal.
+        if (!resultType)
+          return true;
+  
+        auto convertedType = typeConverter.convertType(resultType);
+        LLVM_DEBUG(llvm::dbgs() << "--convertedType: " << convertedType << "\n");
+        LLVM_DEBUG(llvm::dbgs() << "--equal: " << (resultType == convertedType) << "\n");
+        return resultType == convertedType;
+      });
 
   patterns.insert<MaterializeContractionOp, SetEncodingOpLoweringConversion,
                   UnsetEncodingOpLoweringConversion,

@@ -162,20 +162,23 @@ struct MaterializeFlowDispatchTensorLoadOp final
                                          rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> newStrides(newMixedSizes.size(),
                                          rewriter.getIndexAttr(1));
-    SmallVector<int64_t> newStaticDims;
-    SmallVector<Value> newDynamicDims;
-    dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
+    // SmallVector<int64_t> newStaticDims;
+    // SmallVector<Value> newDynamicDims;
+    // dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
 
     Location loc = loadOp.getLoc();
-    Value newLoad = rewriter.create<IREE::TensorExt::DispatchTensorLoadOp>(
-        loc, adaptor.getSource(), newDynamicDims, newOffsets, newMixedSizes,
-        newStrides);
+    // Value newLoad = rewriter.create<IREE::TensorExt::DispatchTensorLoadOp>(
+    //     loc, adaptor.getSource(), newDynamicDims, newOffsets, newMixedSizes,
+    //     newStrides);
     auto extractType = RankedTensorType::get(boundTensorType.getShape(),
                                              boundTensorType.getElementType());
     SmallVector<OpFoldResult> extractSizes = getMixedValues(
         boundTensorType.getShape(), loadOp.getSourceDims(), rewriter);
-    rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
-        loadOp, extractType, newLoad, newOffsets, extractSizes, newStrides);
+    // rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+    //     loadOp, extractType, newLoad, newOffsets, extractSizes, newStrides);
+    rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorLoadOp>(
+      loadOp, adaptor.getSource(), loadOp.getSourceDims(), newOffsets, extractSizes,
+      newStrides);
     return success();
   }
 };
