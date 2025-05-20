@@ -1058,7 +1058,7 @@ stream.executable private @dispatch_0 {
           : !stream.binding ->
             !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>>{%arg0}
       iree_tensor_ext.dispatch.tensor.store %0, %1, offsets = [0, 0], sizes = [%arg0, 2048], strides = [1, 1]
-          : tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>> -> 
+          : tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>> ->
             !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>>{%arg0}
       return
     }

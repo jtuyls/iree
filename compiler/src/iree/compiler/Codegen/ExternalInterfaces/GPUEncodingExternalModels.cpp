@@ -27,8 +27,8 @@
 
 #include "iree/compiler/Codegen/ExternalInterfaces/GPUEncodingExternalModels.h"
 
-#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/Utils/Utils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/GPUTileSwizzleUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"

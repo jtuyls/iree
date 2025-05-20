@@ -362,6 +362,7 @@ static tensor::ParallelInsertSliceOp
 collapseParallelInsertOp(RewriterBase &rewriter,
                          tensor::ParallelInsertSliceOp parallelInsertOp,
                          SmallVector<ReassociationIndices> reassociations) {
+  OpBuilder::InsertionGuard g(rewriter);
   // Compute the collapsed offsets, sizes, and strides.
   auto subsetOp =
       cast<SubsetInsertionOpInterface>(parallelInsertOp.getOperation());
@@ -399,7 +400,7 @@ collapseParallelInsertOp(RewriterBase &rewriter,
         llvm::map_to_vector(groupOffsets, [&](OpFoldResult ofr) {
           return getValueOrCreateConstantIndexOp(rewriter, loc, ofr);
         });
-    setInsertionPointAfterLastNeededValue(rewriter, subsetOp);
+
     OpFoldResult collapsedOffset =
         rewriter
             .create<affine::AffineLinearizeIndexOp>(loc, offsetVals, basis,

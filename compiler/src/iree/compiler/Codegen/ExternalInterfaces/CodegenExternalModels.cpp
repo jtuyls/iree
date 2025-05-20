@@ -17,14 +17,13 @@ using IREE::TensorExt::DispatchTensorType;
 
 struct EncodingNopSerializableEncodingAttrInterface final
     : IREE::Encoding::SerializableEncodingAttrInterface::ExternalModel<
-    EncodingNopSerializableEncodingAttrInterface, EncodingNopLayoutAttr> {
-  Attribute cloneWithLayouts(Attribute attr, ArrayRef<Attribute> layouts) const {
+          EncodingNopSerializableEncodingAttrInterface, EncodingNopLayoutAttr> {
+  Attribute cloneWithLayouts(Attribute attr,
+                             ArrayRef<Attribute> layouts) const {
     // Discard the layouts.
     return attr;
   }
-  bool isSerialized(Attribute attr) const {
-    return true;
-  }
+  bool isSerialized(Attribute attr) const { return true; }
 };
 
 struct EncodingNopDeviceLayoutAttrInterface final

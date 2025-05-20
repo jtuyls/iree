@@ -528,19 +528,20 @@ static SmallVector<unsigned> padOperandsOfOp(RewriterBase &rewriter,
 // Return a list of operands to be padded for each `op`.
 SmallVector<unsigned> getOperandsToPad(Operation *op) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
-  if (!linalgOp || !linalg::isaContractionOpInterface(linalgOp) || isa<IREE::LinalgExt::AttentionOp>(op)) {
+  if (!linalgOp || !linalg::isaContractionOpInterface(linalgOp) ||
+      isa<IREE::LinalgExt::AttentionOp>(op)) {
     return {};
   }
 
   SmallVector<int64_t> operandsNum = {0, 1};
   for (int64_t operandNum : operandsNum) {
     OpOperand &operand = op->getOpOperand(operandNum);
-    std::optional<IREE::Flow::DispatchRegionOp> regionOp = getProducerDispatchRegionOp(operand.get());
+    std::optional<IREE::Flow::DispatchRegionOp> regionOp =
+        getProducerDispatchRegionOp(operand.get());
     bool containsAttention = false;
     if (regionOp.has_value()) {
-      regionOp->walk([&](IREE::LinalgExt::AttentionOp op) {
-        containsAttention = true;
-      });
+      regionOp->walk(
+          [&](IREE::LinalgExt::AttentionOp op) { containsAttention = true; });
     }
     if (containsAttention) {
       llvm::outs() << "containsAttention!!\n";

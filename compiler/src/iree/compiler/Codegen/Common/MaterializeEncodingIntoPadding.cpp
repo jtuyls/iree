@@ -98,7 +98,8 @@ struct MaterializePadEncodingTypeConverter final
     });
     addConversion([&](IREE::TensorExt::DispatchTensorType dispatchTensorType)
                       -> IREE::TensorExt::DispatchTensorType {
-      LLVM_DEBUG(llvm::dbgs() << "addConversion DispatchTensorType: " << dispatchTensorType << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "addConversion DispatchTensorType: "
+                              << dispatchTensorType << "\n");
       auto type = dyn_cast<RankedTensorType>(dispatchTensorType.getBoundType());
       if (!type || !type.getEncoding()) {
         return dispatchTensorType;
@@ -133,7 +134,7 @@ struct MaterializeFlowDispatchTensorLoadOp final
   matchAndRewrite(IREE::TensorExt::DispatchTensorLoadOp loadOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-                    LLVM_DEBUG(llvm::dbgs() << "LOAD: " << loadOp << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "LOAD: " << loadOp << "\n");
     // Only handle operations where the load covers the entire
     // `!iree_tensor_ext.dispatch.tensor` type.
     if (!loadOp.isLoadOfWholeSource()) {
@@ -177,8 +178,8 @@ struct MaterializeFlowDispatchTensorLoadOp final
     // rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
     //     loadOp, extractType, newLoad, newOffsets, extractSizes, newStrides);
     rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorLoadOp>(
-      loadOp, adaptor.getSource(), loadOp.getSourceDims(), newOffsets, extractSizes,
-      newStrides);
+        loadOp, adaptor.getSource(), loadOp.getSourceDims(), newOffsets,
+        extractSizes, newStrides);
     return success();
   }
 };
@@ -195,7 +196,7 @@ struct MaterializeFlowDispatchTensorStoreOp final
   matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-                    LLVM_DEBUG(llvm::dbgs() << "STORE: " << storeOp << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "STORE: " << storeOp << "\n");
     // Only handle operations where the store covers the entire
     // `!iree_tensor_ext.dispatch.tensor` type.
     if (!storeOp.isStoreToWholeTarget()) {
@@ -221,7 +222,8 @@ struct MaterializeFlowDispatchTensorStoreOp final
     Location loc = storeOp.getLoc();
     SmallVector<Value> dynamicResultSizes{storeOp->getOperands()};
     // Value empty =
-    //     rewriter.create<tensor::EmptyOp>(loc, paddedType, dynamicResultSizes);
+    //     rewriter.create<tensor::EmptyOp>(loc, paddedType,
+    //     dynamicResultSizes);
 
     SmallVector<OpFoldResult> offsets(paddedType.getRank(),
                                       rewriter.getIndexAttr(0));
@@ -242,8 +244,8 @@ struct MaterializeFlowDispatchTensorStoreOp final
     //     storeOp, insertOp, adaptor.getTarget(), newDynamicDims, offsets,
     //     newMixedSizes, strides);
     rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
-          storeOp, adaptor.getValue(), adaptor.getTarget(), adaptor.getTargetDims(), offsets,
-          sizes, strides);
+        storeOp, adaptor.getValue(), adaptor.getTarget(),
+        adaptor.getTargetDims(), offsets, sizes, strides);
     return success();
   }
 };
@@ -262,11 +264,14 @@ struct MaterializeInterfaceBindingEncoding final
   matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp subspanOp,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-                    LLVM_DEBUG(llvm::dbgs() << "MaterializeInterfaceBindingEncoding: " << subspanOp << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "MaterializeInterfaceBindingEncoding: " << subspanOp << "\n");
     auto resultType = dyn_cast<IREE::TensorExt::DispatchTensorType>(
         subspanOp.getResult().getType());
     if (!resultType) {
-      LLVM_DEBUG(llvm::dbgs() << "expected result type to be !iree_tensor_ext.dispatch.tensor\n");
+      LLVM_DEBUG(
+          llvm::dbgs()
+          << "expected result type to be !iree_tensor_ext.dispatch.tensor\n");
       return rewriter.notifyMatchFailure(
           subspanOp,
           "expected result type to be !iree_tensor_ext.dispatch.tensor");
@@ -279,7 +284,7 @@ struct MaterializeInterfaceBindingEncoding final
         subspanOp, newResultType, subspanOp.getLayout(), subspanOp.getBinding(),
         subspanOp.getByteOffset(), newDynamicDims, subspanOp.getAlignmentAttr(),
         subspanOp.getDescriptorFlagsAttr());
-        LLVM_DEBUG(llvm::dbgs() << "--success\n");
+    LLVM_DEBUG(llvm::dbgs() << "--success\n");
     return success();
   }
 };
