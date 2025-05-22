@@ -17,10 +17,8 @@ include "mlir/Pass/PassBase.td"
 // relevant group and keep them alphabetical within a group.
 
 //===---------------------------------------------------------------------===//
-// Dispatch region creation preprocessing passes :
-// Passes that transform the program before forming dispatches, like
-// - Elementwise operation fusion
-// - Reshape propagation passes
+// Dispatch creation utility passes :
+// Passes that can be used at different stages of the dispatch creation.
 //===---------------------------------------------------------------------===//
 
 def BubbleUpExpandShapesPass :
@@ -34,6 +32,13 @@ def BubbleUpExpandShapesPass :
     "mlir::affine::AffineDialect",
   ];
 }
+
+//===---------------------------------------------------------------------===//
+// Dispatch region creation preprocessing passes :
+// Passes that transform the program before forming dispatches, like
+// - Elementwise operation fusion
+// - Reshape propagation passes
+//===---------------------------------------------------------------------===//
 
 def ElementwiseOpFusionPass :
     Pass<"iree-dispatch-creation-elementwise-op-fusion", ""> {

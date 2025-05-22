@@ -166,9 +166,12 @@ void BubbleUpExpandShapesPass::runOnOperation() {
       [&](OpOperand *fusedOperand) {
         Operation *producer = fusedOperand->get().getDefiningOp();
         Operation *consumer = fusedOperand->getOwner();
-        if (!IREE::Flow::isNonNullAndOutsideDispatch({producer, consumer})) {
+        if (!producer || !consumer) {
           return false;
         }
+        // if (!IREE::Flow::isNonNullAndOutsideDispatch({producer, consumer})) {
+        //   return false;
+        // }
 
         if (canCauseReshapingLoopByExpansion(producer, consumer)) {
           return false;

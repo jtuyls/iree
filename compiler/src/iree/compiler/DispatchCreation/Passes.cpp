@@ -251,6 +251,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
           return DispatchCreation::createSetEncodingPass(
               DispatchCreation::SetEncodingPassOptions{clSetEncodingStrategy});
         })
+        // Bubble `expand/collapse_shapes` operations that can be introduced into the dispatch region by SetEncoding. This is useful for propagating expanded dimension information.
+        .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
         // SetEncodingOps should not be in the same dispatch as the data-tiled
         // op, so hoist them out of their current dispatch regions. Also, bubble
         // SetEncodingOps through special operations like bit-extending ops and

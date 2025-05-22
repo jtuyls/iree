@@ -1,25 +1,25 @@
 // RUN: iree-opt --split-input-file --mlir-print-local-scope --pass-pipeline="builtin.module(util.func(iree-dispatch-creation-bubble-up-expand-shapes))" %s | FileCheck %s --check-prefixes=CHECK,CHECK-DEFAULT
 // RUN: iree-opt --split-input-file --mlir-print-local-scope --pass-pipeline="builtin.module(util.func(iree-dispatch-creation-bubble-up-expand-shapes{enable-bubble-up-expand-shapes-across-reduction-ops}))" %s | FileCheck %s --check-prefixes=CHECK,CHECK-AGGRESSIVE
 
-util.func public @bubbble_expand_through_extract(%arg0 : tensor<2x4096x5120xf16>) -> (tensor<2x64x64x2560xf16>) {
+util.func public @bubble_expand_through_extract(%arg0 : tensor<2x4096x5120xf16>) -> (tensor<2x64x64x2560xf16>) {
   %extracted_slice_237 = tensor.extract_slice %arg0[0, 0, 0] [2, 4096, 2560] [1, 1, 1] : tensor<2x4096x5120xf16> to tensor<2x4096x2560xf16>
   %expanded_239 = tensor.expand_shape %extracted_slice_237 [[0], [1, 2], [3]] output_shape [2, 64, 64, 2560] : tensor<2x4096x2560xf16> into tensor<2x64x64x2560xf16>
   util.return %expanded_239 : tensor<2x64x64x2560xf16>
 }
 
-// CHECK-LABEL:  @bubbble_expand_through_extract
+// CHECK-LABEL:  @bubble_expand_through_extract
 //       CHECK:    %[[EXPAND:.+]] = tensor.expand_shape
 //       CHECK:    %[[EXTRACT:.+]] = tensor.extract_slice %[[EXPAND]]
 
 // -----
 
-util.func public @unsupported_bubbble_expand_through_extract(%arg0 : tensor<2x4096x5120xf16>) -> (tensor<2x32x64x2560xf16>) {
+util.func public @unsupported_bubble_expand_through_extract(%arg0 : tensor<2x4096x5120xf16>) -> (tensor<2x32x64x2560xf16>) {
   %extracted_slice_237 = tensor.extract_slice %arg0[0, 0, 0] [2, 2048, 2560] [1, 1, 1] : tensor<2x4096x5120xf16> to tensor<2x2048x2560xf16>
   %expanded_239 = tensor.expand_shape %extracted_slice_237 [[0], [1, 2], [3]] output_shape [2, 32, 64, 2560] : tensor<2x2048x2560xf16> into tensor<2x32x64x2560xf16>
   util.return %expanded_239 : tensor<2x32x64x2560xf16>
 }
 
-// CHECK-LABEL:  @unsupported_bubbble_expand_through_extract
+// CHECK-LABEL:  @unsupported_bubble_expand_through_extract
 //       CHECK:    %[[EXTRACT:.+]] = tensor.extract_slice
 //       CHECK:    %[[EXPAND:.+]] = tensor.expand_shape %[[EXTRACT]]
 
@@ -199,9 +199,36 @@ util.func public @test_no_infinite_loop_unit_dim_expansion(%arg0 : tensor<4xi64>
   util.return %11 : tensor<4xi64>
 }
 
-// CHECK-LABEL: test_no_infinite_loop_unit_dim_expansion
-// CHECK-NOT: tensor.expand_shape
-// CHECK: linalg.generic
-// CHECK: tensor.expand_shape
-// CHECK: linalg.generic
-// CHECK-NOT: tensor.expand_shape
+// CHECK-LABEL: @test_no_infinite_loop_unit_dim_expansion
+//   CHECK-NOT:   tensor.expand_shape
+//       CHECK:   linalg.generic
+//       CHECK:   tensor.expand_shape
+//       CHECK:   linalg.generic
+//   CHECK-NOT:   tensor.expand_shape
+
+// -----
+
+// Test that `tensor.expand_shape` can be bubbled up within a dispatch region. This enables bubbling up shape information.
+
+util.func public @bubble_expand_within_dispatch_region(%arg0: tensor<?xf8E4M3FNUZ>) -> tensor<?x32xbf16> {
+  %c0 = arith.constant 0 : index
+  %c32 = arith.constant 32 : index
+  %dim = tensor.dim %arg0, %c0 : tensor<?xf8E4M3FNUZ>
+  %0 = arith.divsi %dim, %c32 : index
+  %1 = flow.dispatch.region -> (tensor<?x32xbf16>{%0}) {
+    %2 = tensor.empty(%dim) : tensor<?xbf16>
+    %3 = linalg.generic {indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>], iterator_types = ["parallel"]} ins(%arg0 : tensor<?xf8E4M3FNUZ>) outs(%2 : tensor<?xbf16>) {
+    ^bb0(%in: f8E4M3FNUZ, %out: bf16):
+      %4 = arith.extf %in : f8E4M3FNUZ to bf16
+      linalg.yield %4 : bf16
+    } -> tensor<?xbf16>
+    %expanded = tensor.expand_shape %3 [[0, 1]] output_shape [%0, 32] : tensor<?xbf16> into tensor<?x32xbf16>
+    flow.return %expanded : tensor<?x32xbf16>
+  }
+  util.return %1 : tensor<?x32xbf16>
+}
+// CHECK-LABEL: @bubble_expand_within_dispatch_region
+//       CHECK:   flow.dispatch.region -> (tensor<?x32xbf16>{%{{.+}}}) {
+//       CHECK:     tensor.expand_shape
+//       CHECK:     linalg.generic
+//       CHECK:   }
