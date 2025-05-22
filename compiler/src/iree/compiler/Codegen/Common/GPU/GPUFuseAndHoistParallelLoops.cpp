@@ -411,7 +411,7 @@ void GPUFuseAndHoistParallelLoopsPass::runOnOperation() {
     patterns.add<FuseTilableDestinationProducers>(context);
     patterns.add<FuseUnitLoopDestination>(context);
     patterns.add<FuseTilableForallConsumers>(context);
-    patterns.add<FuseCollapseShapeConsumers>(context);
+    // patterns.add<FuseCollapseShapeConsumers>(context);
     patterns.add<FuseExtractSliceConsumers>(context);
     populateSwapExtractWithExpandPattern(patterns);
     tensor::populateFoldTensorEmptyPatterns(patterns);
