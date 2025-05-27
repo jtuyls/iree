@@ -1218,6 +1218,7 @@ static void buildLLVMGPUCodegenConfigurationPassPipelineImpl(
     // This materializes into 'nop' in the absence of pad encoding layout
     // attributes.
     funcPassManager.addPass(createBlockDynamicDimensionsPass);
+    funcPassManager.addPass(createFuseCollapseIntoStorePass);
     funcPassManager.addPass(createConfigTrackingCanonicalizerPass);
     funcPassManager.addPass(createCSEPass);
   }

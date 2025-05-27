@@ -19,6 +19,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -306,6 +307,7 @@ struct FuseCollapseIntoTensorStoreOp
       return rewriter.notifyMatchFailure(storeOp, "expected `tensor.collapse_shape` source");
     }
     RankedTensorType srcType = collapseOp.getSrcType();
+    RankedTensorType collapseType = collapseOp.getResultType();
     SmallVector<ReassociationIndices, 4> reassociationMaps =
               collapseOp.getReassociationIndices();
 
@@ -323,38 +325,82 @@ struct FuseCollapseIntoTensorStoreOp
           subspanOp,
           "expected result type to be !iree_tensor_ext.dispatch.tensor");
     }
+
+    Location loc = storeOp.getLoc();
+    rewriter.setInsertionPoint(subspanOp);
+    ArrayRef<int64_t> srcShape = srcType.getShape();
+    ArrayRef<int64_t> resultShape = resultType.getShape();
     
     auto newResultType = IREE::TensorExt::DispatchTensorType::get(
       resultType.getAccess(), srcType);
     LLVM_DEBUG(llvm::dbgs() << "--newResultType: " << newResultType << "\n");
     SmallVector<Value> dynamicDims = subspanOp.getDynamicDims();
+    LLVM_DEBUG(llvm::dbgs() << "--dynamicDims: " << dynamicDims.size() << "\n");
+    SmallVector<Value> newSubspanDynamicDims;
+    size_t dynIndex = 0;
+    for (auto [i, dim] : llvm::enumerate(resultShape)) {
+      if (!ShapedType::isDynamic(dim)) continue;
+      ReassociationIndices reassoc = reassociationMaps[i];
+      int64_t staticVal = 1;
+      bool foundDynamic = false;
+      for (int64_t reassocIndex : reassoc) {
+        int64_t srcDim = srcShape[reassocIndex];
+        if (ShapedType::isDynamic(srcDim)) {
+          if (foundDynamic) return failure();
+          foundDynamic = true;
+        } else {
+          staticVal *= srcDim;
+        }
+      }
+      AffineExpr result = rewriter.getAffineDimExpr(0).floorDiv(rewriter.getAffineConstantExpr(staticVal));
+      AffineMap map = AffineMap::get(1, 0, result);
+      
+      auto newDynamicDim = rewriter.create<mlir::affine::AffineApplyOp>(
+        loc, map, ValueRange{dynamicDims[dynIndex]});
+      newSubspanDynamicDims.push_back(newDynamicDim);
+      dynIndex++;
+    }
     rewriter.replaceOpWithNewOp<IREE::HAL::InterfaceBindingSubspanOp>(
         subspanOp, newResultType, subspanOp.getLayout(), subspanOp.getBinding(),
-        subspanOp.getByteOffset(), newDynamicDims, subspanOp.getAlignmentAttr(),
+        subspanOp.getByteOffset(), newSubspanDynamicDims, subspanOp.getAlignmentAttr(),
         subspanOp.getDescriptorFlagsAttr());
     // LLVM_DEBUG(llvm::dbgs() << "--success\n");
     
     LLVM_DEBUG(llvm::dbgs() << "BEFORE EXPAND\n");
+    rewriter.setInsertionPoint(storeOp);
 
-    Location loc = storeOp.getLoc();
+    
     // IREE::TensorExt::DispatchTensorType targetType = storeOp.getTargetType();
     // auto expandShapeType = IREE::TensorExt::DispatchTensorType::get(
     //   targetType.getAccess(), srcType);
     // auto expandShape = rewriter.create<tensor::ExpandShapeOp>(
     //   loc, expandShapeType, storeOp.getTarget(), reassociationMaps);
 
-      LLVM_DEBUG(llvm::dbgs() << "BEFORE OFFSETS\n");
+    // LLVM_DEBUG(llvm::dbgs() << "BEFORE OFFSETS\n");
 
     SmallVector<OpFoldResult> newOffsets(srcType.getRank(), rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> newStrides(srcType.getRank(), rewriter.getIndexAttr(1));
-    SmallVector<OpFoldResult> newMixedSizes =
-        tensor::getMixedSizes(rewriter, loc, collapseOp.getSrc());
+    // SmallVector<OpFoldResult> newMixedSizes =
+    //     tensor::getMixedSizes(rewriter, loc, collapseOp.getSrc());
+    SmallVector<OpFoldResult> newMixedSizes;
+    size_t dynSizeIndex = 0;
+    for (int64_t dim : srcShape) {
+      if (ShapedType::isDynamic(dim)) {
+        newMixedSizes.push_back(newSubspanDynamicDims[dynSizeIndex]);
+        dynSizeIndex++;
+      } else {
+        newMixedSizes.push_back(rewriter.getIndexAttr(dim));
+      }
+    }
+    LLVM_DEBUG(llvm::dbgs() << "newMixedSizes: " << newMixedSizes.size() << "\n");
     SmallVector<int64_t> newStaticDims;
     SmallVector<Value> newDynamicDims;
     dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
     rewriter.replaceOpWithNewOp<IREE::TensorExt::DispatchTensorStoreOp>(
         storeOp, collapseOp.getSrc(), storeOp.getTarget(), newDynamicDims,
         newOffsets, newMixedSizes, newStrides);
+    collapseOp->dropAllUses();
+    rewriter.eraseOp(collapseOp);
     return success();
   }
 };

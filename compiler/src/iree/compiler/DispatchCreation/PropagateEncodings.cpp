@@ -46,20 +46,20 @@ struct PropagateEncodingsPass
 
 LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
     IREE::Encoding::SetEncodingOp encodingOp, PatternRewriter &rewriter) const {
-  llvm::outs() << "SwapEncodingOpWithTensorCollapseShapeOp\n";
+  // llvm::outs() << "SwapEncodingOpWithTensorCollapseShapeOp\n";
   Value target = encodingOp.getSource();
   auto propagationAttrInterface =
       dyn_cast<IREE::Encoding::EncodingPropagationAttrInterface>(
           encodingOp.getResultType().getEncoding());
   if (!propagationAttrInterface ||
       !propagationAttrInterface.isPropagable(target)) {
-        llvm::outs() << "NOT isPropagable\n";
-        llvm::outs() << "target: " << target << "\n";
+        // llvm::outs() << "NOT isPropagable\n";
+        // llvm::outs() << "target: " << target << "\n";
     return rewriter.notifyMatchFailure(
         encodingOp, "the propagation attribute interface isn't defined or the "
                     "target isn't propagable");
   }
-  llvm::outs() << "BEFORE propagationEncodings\n";
+  // llvm::outs() << "BEFORE propagationEncodings\n";
   // Get the encoding attributes for the operands and results of the operation.
   FailureOr<IREE::Encoding::PropagationEncoding> propagationEncodings =
       propagationAttrInterface.generateEncodings(target);
