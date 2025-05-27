@@ -213,6 +213,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
   FunctionLikeNest(passManager)
       // Create dispatches for scalar operations as roots.
       .addPass(DispatchCreation::createFormScalarDispatchesPass)
+      // TODO
+      .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
       // Create `flow.dispatch.region` centered around a root and fuse with
       // producers and consumers.
       .addPass([&] {
@@ -266,6 +268,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
         .addPass(DispatchCreation::createPropagateEncodingsPass)
         .addPass(
             DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass);
+        // The SetEncodingPass can insert expand/collapse shapes into dispatch regions.
+        // .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
   }
   FunctionLikeNest(passManager)
       .addPass(DispatchCreation::createConvertEncodingToFlowPass);

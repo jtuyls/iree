@@ -669,6 +669,25 @@ struct MaterializeOptimizationBarrierOp
   }
 };
 
+struct MaterializeCollapseShapeOp
+    : public OpConversionPattern<tensor::CollapseShapeOp> {
+  using OpConversionPattern<tensor::CollapseShapeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::CollapseShapeOp op,
+    tensor::CollapseShapeOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs() << "MaterializeCollapseShapeOp\n");
+    auto tensorType = dyn_cast<RankedTensorType>(op.getType());
+    if (tensorType && !tensorType.getEncoding()) {
+      return rewriter.notifyMatchFailure(op, "no encoding in type");
+    }
+    rewriter.replaceOpWithNewOp<tensor::CollapseShapeOp>(
+        op, adaptor.getSrc(), op.getReassociationIndices());
+    return success();
+  }
+};
+
 static SmallVector<ReassociationIndices>
 getReassociationIndices(int outerDims,
                         const TileSwizzle::ExpandShapeType &expandShape) {
@@ -948,6 +967,23 @@ void populateMaterializeEncodingPatterns(
                    << "--equal: " << (resultType == convertedType) << "\n");
         return resultType == convertedType;
       });
+  target.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
+    [&typeConverter](tensor::CollapseShapeOp collapseOp) {
+      LLVM_DEBUG(llvm::dbgs() << "addDynamicallyLegalOp COLLAPSE\n");
+      auto resultType = llvm::dyn_cast<RankedTensorType>(
+        collapseOp.getType());
+      LLVM_DEBUG(llvm::dbgs() << "--resultType: " << resultType << "\n");
+      // For types that are not `TensorExt::DispatchTensorType` mark as legal.
+      if (!resultType)
+        return true;
+
+      auto convertedType = typeConverter.convertType(resultType);
+      LLVM_DEBUG(llvm::dbgs()
+                  << "--convertedType: " << convertedType << "\n");
+      LLVM_DEBUG(llvm::dbgs()
+                  << "--equal: " << (resultType == convertedType) << "\n");
+      return resultType == convertedType;
+    });
 
   patterns.insert<MaterializeContractionOp, SetEncodingOpLoweringConversion,
                   UnsetEncodingOpLoweringConversion,
@@ -955,6 +991,7 @@ void populateMaterializeEncodingPatterns(
                   MaterializeDPSOperation<linalg::GenericOp>,
                   MaterializeOperation<tensor::EmptyOp>,
                   MaterializeOptimizationBarrierOp,
+                  MaterializeCollapseShapeOp,
                   MaterializeTensorExtDispatchTensorLoadOp,
                   MaterializeTensorExtDispatchTensorStoreOp,
                   MaterializeInterfaceBindingEncoding>(typeConverter, context);
