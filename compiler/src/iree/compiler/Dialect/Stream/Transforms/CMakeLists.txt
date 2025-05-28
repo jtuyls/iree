@@ -29,6 +29,7 @@ iree_cc_library(
     "EmplaceAllocations.cpp"
     "EncodeTensors.cpp"
     "FoldUniformOperands.cpp"
+    "FuseCollapseIntoStore.cpp"
     "FuseDispatchBindings.cpp"
     "LayoutSlices.cpp"
     "MaterializeBuiltins.cpp"

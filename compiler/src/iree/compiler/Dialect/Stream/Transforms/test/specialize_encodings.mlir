@@ -1111,3 +1111,80 @@ util.func public @ignore_encoding_by_identity_encoding(%arg0: index, %arg1: inde
   %0 = stream.tensor.empty on(#hal.device.affinity<@device_a>) : tensor<?x0xf32, #encoding>{%arg0} in !stream.resource<*>{%arg1}
   util.return
 }
+
+// -----
+
+#executable_target_rocm_hsaco_fb = #hal.executable.target<"rocm", "rocm-hsaco-fb", {abi = "hip",
+  iree.encoding.resolver = #iree_gpu.gpu_pad_layout<>,
+  iree.gpu.target = #iree_gpu.target<arch = "gfx942",
+                                     features = "",
+                                     wgp = <compute = fp32,
+                                            storage =  b32,
+                                            subgroup =  none,
+                                            dot =  none,
+                                            mma = [<MFMA_F32_16x16x4_F32>],
+                                            subgroup_size_choices = [64],
+                                            max_workgroup_sizes = [1024, 1024, 1024],
+                                            max_thread_count_per_workgroup = 1024,
+                                            max_workgroup_memory_bytes = 65536,
+                                            max_workgroup_counts = [2147483647, 2147483647, 2147483647]>>}>
+#device_target_local_0_ = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target_rocm_hsaco_fb]> : !hal.device
+#encodingA = #iree_encoding.pad_encoding_layout<[0, ?, ?]>
+#encodingB = #iree_encoding.pad_encoding_layout<[0, 64]>
+#encodingC = #iree_encoding.pad_encoding_layout<[64, 64]>
+
+util.global private @device_a = #device_target_local_0_
+util.func public @with_pad_encoding_multiple_dynamic_dims(%arg0: index, %arg1: index) {
+  %0 = stream.tensor.empty on(#hal.device.affinity<@device_a>) : tensor<?x4x2048xf16, #encodingA>{%arg0} in !stream.resource<*>{%arg1}
+  %1 = stream.tensor.empty on(#hal.device.affinity<@device_a>) : tensor<?x4x16xf16, #encodingA>{%arg0} in !stream.resource<*>{%arg1}
+  %2 = stream.tensor.empty on(#hal.device.affinity<@device_a>) : tensor<?x2048xf16, #encodingB>{%arg0} in !stream.resource<*>{%arg1}
+  %3 = stream.tensor.empty on(#hal.device.affinity<@device_a>) : tensor<?x2048xf16, #encodingC>{%arg0} in !stream.resource<*>{%arg1}
+  util.return
+}
+// CHECK-DAG: #[[$NO_PAD:.+]] = #iree_encoding.layout<[#iree_encoding.pad_encoding_layout<[0, 0]>]
+// CHECK-DAG: #[[$PAD_DIM1_64:.+]] =  #iree_encoding.layout<[#iree_encoding.pad_encoding_layout<[0, 64]>]
+
+// CHECK-LABEL: util.func public @with_pad_encoding_multiple_dynamic_dims(
+// CHECK: stream.tensor.empty {{.*}} : tensor<?x2048xf16, #[[$PAD_DIM1_64]]>
+// CHECK: stream.tensor.empty {{.*}} : tensor<?x16xf16, #[[$NO_PAD]]>
+// CHECK: stream.tensor.empty {{.*}} : tensor<?x2048xf16, #iree_encoding.pad_encoding_layout<[0, 64]>>
+// CHECK: stream.tensor.empty {{.*}} : tensor<?x2048xf16, #iree_encoding.pad_encoding_layout<[64, 64]>>
+
+// -----
+
+#executable_target_rocm_hsaco_fb = #hal.executable.target<"rocm", "rocm-hsaco-fb", {abi = "hip",
+  iree.encoding.resolver = #iree_gpu.gpu_pad_layout<>,
+  iree.gpu.target = #iree_gpu.target<arch = "gfx942",
+                                     features = "",
+                                     wgp = <compute = fp32,
+                                            storage =  b32,
+                                            subgroup =  none,
+                                            dot =  none,
+                                            mma = [<MFMA_F32_16x16x4_F32>],
+                                            subgroup_size_choices = [64],
+                                            max_workgroup_sizes = [1024, 1024, 1024],
+                                            max_thread_count_per_workgroup = 1024,
+                                            max_workgroup_memory_bytes = 65536,
+                                            max_workgroup_counts = [2147483647, 2147483647, 2147483647]>>}>
+#device_target_local_0_ = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target_rocm_hsaco_fb]> : !hal.device
+#encoding = #iree_encoding.pad_encoding_layout<[0, ?, ?]>
+#encodingB = #iree_encoding.pad_encoding_layout<[0, ?]>
+
+util.global private @device_a = #device_target_local_0_
+stream.executable private @executable {
+  stream.executable.export public @dispatch
+  builtin.module {
+    func.func @dispatch(%arg0: !stream.binding, %arg1: index) {
+      %c0 = arith.constant 0 : index
+      %0 = stream.binding.subspan %arg0[%c0] : !stream.binding -> !iree_tensor_ext.dispatch.tensor<readwrite:tensor<?x4x256xf32, #encoding>>
+      return
+    }
+  }
+}
+
+util.func public @test_dispatch_dynamic(%arg0: !stream.resource<external>, %arg1: index, %arg2: index, %arg3: index) -> !stream.resource<*> {
+  %0 = stream.async.transfer %arg0 : !stream.resource<external>{%arg2} from(#hal.device.affinity<@device_a>) -> to(#hal.device.affinity<@device_a>) !stream.resource<*>{%arg2}
+  %1 = stream.tensor.dispatch on(#hal.device.affinity<@device_a>) @executable::@dispatch(%0, %arg3) : (tensor<?x1024xf32, #encodingB>{%arg2} in !stream.resource<*>{%arg1}, index) -> tensor<?x1024xf32, #encodingB>{%arg2} in %0{%arg1}
+  util.return %1 : !stream.resource<*>
+}
+

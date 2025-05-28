@@ -167,7 +167,7 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
 
   // Specialize the encodings before the lowering of stream tensor ops.
   // passManager.addPass(IREE::Stream::createSpecializeEncodingsPass());
-  passManager.addPass(IREE::TensorExt::createFuseCollapseIntoStorePass());
+  passManager.addPass(IREE::Stream::createFuseCollapseIntoStorePass());
   passManager.addPass(IREE::Stream::createSpecializeEncodingsPass());
 
   // Lower stream.tensor.* ops to stream.async.* ops based on

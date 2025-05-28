@@ -93,6 +93,7 @@ static bool isRecognizedEncodingType(Type type) {
 ///     encodings.
 static Type getTypeWithResolvedEncodingLayouts(
     Type type, const SetVector<Attribute> &layoutResolvers) {
+  LLVM_DEBUG(llvm::dbgs() << "getTypeWithResolvedEncodingLayouts\n");
   if (!isRecognizedEncodingType(type)) {
     return type;
   }
@@ -587,6 +588,7 @@ static LogicalResult updateTensorDispatchOp(
     const SetVector<Attribute> &resLayoutResolvers,
     llvm::DenseMap<IREE::Stream::AffinityAndOpPair, SetVector<Attribute>>
         &cachedLayoutAttrs) {
+  LLVM_DEBUG(llvm::dbgs() << "updateTensorDispatchOp\n");
   SmallVector<Type> newOperandEncodings;
   for (auto [operand, typeAttr] :
        llvm::zip_equal(dispatchOp.getMixedOperands(),

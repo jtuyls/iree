@@ -480,6 +480,11 @@ def FoldUniformOperandsPass :
   ];
 }
 
+def FuseCollapseIntoStorePass :
+    Pass<"iree-stream-fuse-collapse-into-store", ""> {
+  let summary = "TODOO";
+}
+
 def FuseDispatchBindingsPass :
     Pass<"iree-stream-fuse-dispatch-bindings", "mlir::ModuleOp"> {
   let summary = "Fuses bindings to the same underlying storage to reduce binding count.";

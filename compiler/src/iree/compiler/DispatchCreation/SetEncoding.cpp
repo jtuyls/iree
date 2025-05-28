@@ -307,6 +307,164 @@ struct FoldFillWithSetEncoding final
   }
 };
 
+// /// Pattern to fold TODO
+// struct FoldCollapseWithSetEncoding final
+//     : OpRewritePattern<IREE::Encoding::SetEncodingOp> {
+//   using OpRewritePattern::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(IREE::Encoding::SetEncodingOp encodingOp,
+//                                 PatternRewriter &rewriter) const override {
+//     LLVM_DEBUG(llvm::dbgs() << "FoldCollapseWithSetEncoding\n");
+//     RankedTensorType encodingType = encodingOp.getResultType();
+//     auto encodingAttr = dyn_cast<IREE::Encoding::EncodingPropagationAttrInterface>(encodingType.getEncoding());
+//     if (!encodingAttr) {
+//       return rewriter.notifyMatchFailure(
+//         encodingOp, "the propagation attribute interface isn't defined");
+//     }
+//     auto collapseOp = dyn_cast_if_present<tensor::CollapseShapeOp>(encodingOp.getSource().getDefiningOp());
+//     if (!collapseOp || !encodingAttr.isPropagable(collapseOp.getResult())) {
+//       return rewriter.notifyMatchFailure(
+//         encodingOp, "not a `tensor.collapse_shape` op or it's not propagable");
+//     }
+
+//     FailureOr<IREE::Encoding::PropagationEncoding> maybePropagationEncoding = encodingAttr.generateEncodings(collapseOp.getResult());
+//     if (failed(maybePropagationEncoding)) {
+//       return rewriter.notifyMatchFailure(
+//           encodingOp, "could not propagate the collapse through the encoding");
+//     }
+//     if (maybePropagationEncoding->operandEncodings.size() != 1) {
+//       return rewriter.notifyMatchFailure(
+//         encodingOp, "expected a single propagated encoding");
+//     }
+//     auto collapseType = cast<RankedTensorType>(collapseOp.getType());
+//     auto newEncodingType = RankedTensorType::get(collapseType.getShape(), collapseType.getElementType(),
+//                                                  maybePropagationEncoding->operandEncodings[0]);
+    
+//     rewriter.replaceOpWithNewOp<IREE::Encoding::SetEncodingOp>(encodingOp, newEncodingType, collapseOp.getSrc());
+//     return success();
+//   }
+// };
+
+// /// Pattern to fold TODO
+// struct FoldCollapseWithSetEncoding final
+//     : OpRewritePattern<IREE::Encoding::SetEncodingOp> {
+//   using OpRewritePattern::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(IREE::Encoding::SetEncodingOp encodingOp,
+//                                 PatternRewriter &rewriter) const override {
+//     LLVM_DEBUG(llvm::dbgs() << "FoldCollapseWithSetEncoding\n");
+//     RankedTensorType encodingType = encodingOp.getResultType();
+//     auto encodingAttr = dyn_cast<IREE::Encoding::EncodingPropagationAttrInterface>(encodingType.getEncoding());
+//     if (!encodingAttr) {
+//       return rewriter.notifyMatchFailure(
+//         encodingOp, "the propagation attribute interface isn't defined");
+//     }
+//     auto collapseOp = dyn_cast_if_present<tensor::CollapseShapeOp>(encodingOp.getSource().getDefiningOp());
+//     if (!collapseOp || !encodingAttr.isPropagable(collapseOp.getResult())) {
+//       return rewriter.notifyMatchFailure(
+//         encodingOp, "not a `tensor.collapse_shape` op or it's not propagable");
+//     }
+//     if (encodingOp.hasOneUse()) {
+//       return rewriter.notifyMatchFailure(encodingOp, "expected a single use");
+//     }
+//     Value encodingOpUse = encodingOp.getUses()[0];
+//     auto returnOp = dyn_cast_if_present<IREE::Flow::ReturnOp>(encodingOpUse.getDefiningOp());
+//     if (!returnOp) {
+//       return rewriter.notifyMatchFailure(encodingOp, "expected a return after `set_encoding`");
+//     }
+//     auto dispatchOp = getParentOfType<IREE::Flow::DispatchRegionOp>(encodingOp);
+//     if (!dispatchOp) {
+//       return rewriter.notifyMatchFailure(encodingOp, "should be located within a dispatch region");
+//     }
+//     SmallVector<IREE::Encoding::UnsetEncodingOp> unsetEncodingOps;
+//     unsetEncodingOps.reserve(dispatchOp.getUsers().size());
+//     for (Operation *user : dispatchOp.getUsers()) {
+//       auto unsetEncodingOp = dyn_cast_if_present<IREE::Encoding::UnsetEncodingOp>(user);
+//       if (!unsetEncodingOp) {
+//         return rewriter.notifyMatchFailure(dispatchOp, "should only have unset_encoding users");
+//       }
+//       unsetEncodingOps.push_back(unsetEncodingOp);
+//     }
+
+//     unsigned resultNumber = cast<OpResult>(encodingOpUse).getResultNumber();
+//     LLVM_DEBUG(llvm::dbgs() << "--resultNumber: " << resultNumber << "\n");
+//     SmallVector<Value> dynamicDims = dispatchOp.getResultDynamicDims(resultNumber);
+//     LLVM_DEBUG(llvm::dbgs() << "--dynamicDims: " << dynamicDims.size() << "\n");
+//     SmallVector<ReassociationIndices, 4> reassociationMaps = collapseOp.getReassociationIndices();
+//     RankedTensorType srcType = collapseOp.getSrcType();
+//     ArrayRef<int64_t> srcShape = srcType.getShape();
+//     ArrayRef<int64_t> resultShape = encodingType.getShape();
+
+//     rewriter.setInsertionPoint(dispatchOp);
+//     SmallVector<Value> newDynamicDims;
+//     size_t dynIndex = 0;
+//     for (auto [i, dim] : llvm::enumerate(resultShape)) {
+//       if (!ShapedType::isDynamic(dim)) continue;
+//       ReassociationIndices reassoc = reassociationMaps[i];
+//       int64_t staticVal = 1;
+//       bool foundDynamic = false;
+//       for (int64_t reassocIndex : reassoc) {
+//         int64_t srcDim = srcShape[reassocIndex];
+//         if (ShapedType::isDynamic(srcDim)) {
+//           if (foundDynamic) return failure();
+//           foundDynamic = true;
+//         } else {
+//           staticVal *= srcDim;
+//         }
+//       }
+//       AffineExpr result = rewriter.getAffineDimExpr(0).floorDiv(rewriter.getAffineConstantExpr(staticVal));
+//       AffineMap map = AffineMap::get(1, 0, result);
+      
+//       auto newDynamicDim = rewriter.create<mlir::affine::AffineApplyOp>(
+//         loc, map, ValueRange{dynamicDims[dynIndex]});
+//       newDynamicDims.push_back(newDynamicDim);
+//       dynIndex++;
+//     }
+
+//     LLVM_DEBUG(llvm::dbgs() << "--before maybePropagationEncoding\n");
+
+//     FailureOr<IREE::Encoding::PropagationEncoding> maybePropagationEncoding = encodingAttr.generateEncodings(collapseOp.getResult());
+//     if (failed(maybePropagationEncoding)) {
+//       return rewriter.notifyMatchFailure(
+//           encodingOp, "could not propagate the collapse through the encoding");
+//     }
+//     if (maybePropagationEncoding->operandEncodings.size() != 1) {
+//       return rewriter.notifyMatchFailure(
+//         encodingOp, "expected a single propagated encoding");
+//     }
+//     auto collapseType = cast<RankedTensorType>(collapseOp.getType());
+//     auto newEncodingType = collapseType.cloneWithEncoding(maybePropagationEncoding->operandEncodings[0]);
+
+//     LLVM_DEBUG(llvm::dbgs() << "--before newDispatch\n");
+
+//     auto newResultTypes = llvm::to_vector(dispatchOp->getResultTypes());
+//     newResultTypes[resultNumber] = newEncodingType;
+//     SmallVector<Value> newResultDynamicDims;
+//     for (auto [i, result] : llvm::enumerate(dispatchOp.getResults())) {
+//       if (i != resultNumber) {
+//         llvm::append_range(newResultDynamicDims, dispatchOp.getResultDynamicDims(i));
+//         continue;
+//       }
+//       llvm::append_range(newResultDynamicDims, newDynamicDims);
+//     }
+
+//     auto newDispatchOp = rewriter.create<IREE::Flow::DispatchRegionOp>(
+//       dispatchOp->getLoc(), newResultTypes, newResultDynamicDims,
+//       dispatchOp.getWorkload());
+//     newDispatchOp.getBody().takeBody(dispatchOp.getBody());
+
+//     // rewriter.modifyOpInPlace(
+//     //   returnOp, [&]() { returnOp.getOperandsMutable().assign(yieldedVals); });
+    
+//     rewriter.replaceOpWithNewOp<IREE::Encoding::SetEncodingOp>(encodingOp, newEncodingType, collapseOp.getSrc());
+//     for (auto unsetEncodingOp : unsetEncodignOps) {
+//       rewriter.replaceOpWithNewOp<IREE::Encoding::UnsetEncodingOp>(
+//         unsetEncodingOp, unsetEncodingOp, newDispatchOp, newResultDynamicDims);
+//     }
+//     return success();
+//   }
+// };
+
 //===---------------------------------------------------------------------===//
 // Set padding encodings
 //===---------------------------------------------------------------------===//
@@ -360,6 +518,8 @@ getProducerDispatchRegionOp(Value operand) {
 }
 
 struct PaddedValue {
+  Value producerValue;
+  SmallVector<Operation *> opChain;
   Value paddedValue;
   SmallVector<Value> dynamicDims;
 };
@@ -402,6 +562,12 @@ static std::optional<PaddedValue> padProducerOfValue(RewriterBase &rewriter,
   }
 
   if (!producerValue) {
+    return std::nullopt;
+  }
+
+  operandType = dyn_cast<RankedTensorType>(producerValue.getType());
+  if (!operandType || operandType.getRank() == 0) {
+    LLVM_DEBUG(llvm::dbgs() << "FAIL\n");
     return std::nullopt;
   }
 
@@ -470,25 +636,25 @@ static std::optional<PaddedValue> padProducerOfValue(RewriterBase &rewriter,
   }
 
   // Clone the operation chain.
-  IRMapping map;
+  // IRMapping map;
   auto returnOp = cast<IREE::Flow::ReturnOp>(newBody.front().getTerminator());
   Value yieldedVal = returnOp.getOperand(resultNumber);
 
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(returnOp);
-  map.map(producerValue, yieldedVal);
+  // map.map(producerValue, yieldedVal);
 
-  for (Operation *op : llvm::reverse(opChain)) {
-    rewriter.clone(*op, map);
-  }
+  // for (Operation *op : llvm::reverse(opChain)) {
+  //   rewriter.clone(*op, map);
+  // }
   // Find the new value to yield.
-  Value newYieldedVal = map.lookup(operand);
+  Value newYieldedVal = yieldedVal; // map.lookup(operand);
   auto encodingOp = rewriter.create<IREE::Encoding::SetEncodingOp>(
       returnOp->getLoc(), newResultType, newYieldedVal);
   rewriter.modifyOpInPlace(
       returnOp, [&]() { returnOp.setOperand(resultNumber, encodingOp); });
 
-  return PaddedValue{newDispatchOp->getResult(resultNumber),
+  return PaddedValue{producerValue, opChain, newDispatchOp->getResult(resultNumber),
                      operandDynamicDims};
 }
 
@@ -515,11 +681,20 @@ static SmallVector<unsigned> padOperandsOfOp(RewriterBase &rewriter,
     rewriter.modifyOpInPlace(op, [&]() {
       OpBuilder::InsertionGuard g2(rewriter);
       rewriter.setInsertionPoint(op);
-      Type operandType = operand.get().getType();
+      // Type operandType = operand.get().getType();
+      Type operandType = paddedVal->producerValue.getType();
       auto unsetEncodignOp = rewriter.create<IREE::Encoding::UnsetEncodingOp>(
           op->getLoc(), operandType, paddedVal->paddedValue,
           paddedVal->dynamicDims);
-      op->setOperand(operandNum, unsetEncodignOp.getResult());
+      
+      IRMapping map;
+      map.map(paddedVal->producerValue, unsetEncodignOp->getResult(0));
+      Operation *lastOp = unsetEncodignOp.getOperation();
+      for (Operation *op : llvm::reverse(paddedVal->opChain)) {
+        lastOp = rewriter.clone(*op, map);
+      }
+
+      op->setOperand(operandNum, lastOp->getResult(0));
     });
   }
   return paddedOperands;
@@ -543,10 +718,10 @@ SmallVector<unsigned> getOperandsToPad(Operation *op) {
       regionOp->walk(
           [&](IREE::LinalgExt::AttentionOp op) { containsAttention = true; });
     }
-    if (containsAttention) {
-      llvm::outs() << "containsAttention!!\n";
-      return {};
-    }
+    // if (containsAttention) {
+    //   llvm::outs() << "containsAttention!!\n";
+    //   return {};
+    // }
   }
 
   // Bail out on matvec / vecmat and skinny matmul problems.
@@ -640,6 +815,7 @@ static LogicalResult setPaddingEncodings(MLIRContext *context,
   RewritePatternSet dimResolutionPatterns(context);
   memref::populateResolveRankedShapedTypeResultDimsPatterns(
       dimResolutionPatterns);
+  // dimResolutionPatterns.add<FoldCollapseWithSetEncoding>(context);
   GreedyRewriteConfig config;
   config.enableFolding(true).setMaxIterations(GreedyRewriteConfig::kNoLimit);
   if (failed(applyPatternsGreedily(funcOp, std::move(dimResolutionPatterns),
@@ -664,6 +840,11 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
       if (failed(setPaddingEncodings(context, funcOp))) {
         return signalPassFailure();
       }
+      // RewritePatternSet patterns(context);
+      // patterns.add<FoldCollapseWithSetEncoding>(context);
+      // if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+      //   return signalPassFailure();
+      // }
       return;
     }
 
@@ -671,6 +852,7 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
     patterns.add<SetContractionOpEncoding>(context, encodingOption.getValue());
     linalg::FillOp::getCanonicalizationPatterns(patterns, context);
     patterns.add<FoldFillWithSetEncoding>(context);
+    // patterns.add<FoldCollapseWithSetEncoding>(context);
     memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
     GreedyRewriteConfig config;
     config.enableConstantCSE(false);
