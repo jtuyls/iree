@@ -38,6 +38,7 @@
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
+#include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
@@ -51,8 +52,8 @@
 
 namespace mlir::iree_compiler::IREE::GPU {
 
-using Codegen::MaterializeEncodingInfo;
-using Codegen::TileMxNxK;
+using IREE::Codegen::MaterializeEncodingInfo;
+using IREE::Codegen::TileMxNxK;
 
 namespace {
 
@@ -81,7 +82,7 @@ static MMAAttr chooseIntrinsicMMAAttr(TypeRange eTypes, TargetWgpAttr wgp) {
 
 static DataTiledMMAAttr
 chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
-                       Encoding::EncodingAttr encoding) {
+                       IREE::Encoding::EncodingAttr encoding) {
   if (!target) {
     return {};
   }
@@ -348,7 +349,7 @@ struct GPUDeviceEncodingPackedLayoutAttrInterface
     info = std::move(maybeEncodingInfo.value());
     auto fragment = static_cast<IREE::GPU::MMAFragment>(
         encoding.getOperandIndex().getInt());
-    FailureOr<Codegen::TileSwizzle> maybeSwizzle =
+    FailureOr<IREE::Codegen::TileSwizzle> maybeSwizzle =
         getEncodingSwizzle(encoding, mma, fragment);
     if (failed(maybeSwizzle)) {
       return info;
@@ -416,7 +417,7 @@ struct GPUHostEncodingLayoutResolverAttrInterface final
 };
 
 struct GPUPadDeviceEncodingLayoutAttrInterface final
-    : Encoding::LayoutAttrInterface::ExternalModel<
+    : IREE::Encoding::LayoutAttrInterface::ExternalModel<
           GPUPadDeviceEncodingLayoutAttrInterface, GPUPadLayoutAttr> {
   Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
                      TypeRange convertedResTypes,
@@ -426,7 +427,7 @@ struct GPUPadDeviceEncodingLayoutAttrInterface final
 };
 
 struct GPUPadEncodingLayoutResolverAttrInterface final
-    : Encoding::EncodingLayoutResolverAttrInterface::ExternalModel<
+    : IREE::Encoding::EncodingLayoutResolverAttrInterface::ExternalModel<
           GPUPadEncodingLayoutResolverAttrInterface, GPUPadLayoutAttr> {
   Attribute cloneWithSimplifiedConfig(Attribute attr,
                                       DictionaryAttr config) const {
@@ -435,7 +436,7 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     std::optional<IREE::GPU::L1CacheInfo> cache =
         IREE::GPU::getL1CacheInfo(gpuTarget);
     if (!cache) {
-      return IREE::Codegen::EncodingNopLayoutAttr::get(ctx);
+      return GPUPadLayoutAttr::get(ctx, std::nullopt, std::nullopt);
     }
     return GPUPadLayoutAttr::get(ctx, cache->cacheLineBytes, cache->cacheSets);
   }
@@ -445,7 +446,7 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     auto gpuPadLayoutAttr = cast<GPUPadLayoutAttr>(attr);
 
     auto paddingEncodingAttr =
-        dyn_cast_or_null<Encoding::PadEncodingLayoutAttr>(type.getEncoding());
+        dyn_cast_or_null<IREE::Encoding::PadEncodingLayoutAttr>(type.getEncoding());
     if (!paddingEncodingAttr) {
       return nullptr;
     }
@@ -478,7 +479,7 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     }
 
     auto noPaddingAttr =
-        Encoding::PadEncodingLayoutAttr::getIdentityAttr(ctx, rank);
+        IREE::Encoding::PadEncodingLayoutAttr::getIdentityAttr(ctx, rank);
     if (!gpuPadLayoutAttr.getCacheLineBytes() ||
         !gpuPadLayoutAttr.getCacheSets()) {
       return noPaddingAttr;
@@ -521,7 +522,7 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     int64_t numPadElements = (padBytes * 8) / elementBits;
     SmallVector<int64_t> padValues(rank, 0);
     padValues.back() = numPadElements;
-    auto padLayout = Encoding::PadEncodingLayoutAttr::get(ctx, padValues);
+    auto padLayout = IREE::Encoding::PadEncodingLayoutAttr::get(ctx, padValues);
     return padLayout;
   }
 };

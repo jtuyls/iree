@@ -354,6 +354,7 @@ static void addGPUBufferizePasses(OpPassManager &funcPassManager) {
   funcPassManager.addPass(createGPUInferMemorySpacePass());
   funcPassManager.addPass(createROCDLConfigureBufferInstructionsPass());
   funcPassManager.addPass(createGPUBubbleResourceCastsPass());
+  funcPassManager.addPass(createGPUAllocPrivateMemoryForDPSOpsPass());
   BufferizationOptions::AllocationFn allocationFn =
       gpuRequireMemSpaceAllocationFn;
   BufferizationOptions::MemCpyFn memcpyFn = [](OpBuilder &builder, Location loc,
@@ -909,6 +910,7 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
   if (!usePadToModelSharedMemcpy) {
     LinalgFoldUnitExtentDimsPassOptions options;
     options.useRankReducingSlices = true;
+    funcPassManager.addPass(IREE::LinalgExt::createFoldUnitExtentDimsPass());
     funcPassManager.addPass(
         IREE::VectorExt::createVectorExtFoldUnitExtentDimsPass());
     funcPassManager.addPass(mlir::createLinalgFoldUnitExtentDimsPass(options));
@@ -1227,6 +1229,7 @@ static void buildLLVMGPUCodegenConfigurationPassPipelineImpl(
 
 void buildLLVMGPUCodegenConfigurationPassPipeline(
     OpPassManager &variantPassManager) {
+  variantPassManager.addPass(createSpecializeExportsPass());
   buildLLVMGPUCodegenConfigurationPassPipelineImpl(
       variantPassManager.nest<ModuleOp>());
 }
@@ -1305,6 +1308,7 @@ static void buildROCDLCodegenConfigurationPassPipelineImpl(
 
 void buildROCDLCodegenConfigurationPassPipeline(
     OpPassManager &variantPassManager) {
+  variantPassManager.addPass(createSpecializeExportsPass());
   OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
   buildROCDLCodegenConfigurationPassPipelineImpl(modulePassManager);
 }

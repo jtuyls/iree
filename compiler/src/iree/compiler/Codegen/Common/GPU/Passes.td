@@ -30,6 +30,26 @@ def GPUCheckResourceUsagePass :
   let constructor = "mlir::iree_compiler::createGPUCheckResourceUsagePass()";
 }
 
+def GPUCombineLayoutTransformationPass :
+    InterfacePass<"iree-codegen-gpu-combine-layout-transformation", "mlir::FunctionOpInterface"> {
+  let summary =
+    "Combines layout transformation operations into a single map_scatter operation.";
+  let description = [{
+    Starting from iree_codegen.store_to_buffer ops, iteratively combine producer
+    layout/indexing transformation ops (linalg.transpose, tensor.collapse_shape,
+    etc.) into a single iree_linalg_ext.map_scatter operation. For tensor.pad
+    ops, the writing of pad values is distributed to workgroups and threads, and
+    then the padding values are written directly to the output buffer of the
+    store_to_buffer op.
+  }];
+  let dependentDialects = [
+    "iree_compiler::IREE::LinalgExt::IREELinalgExtDialect",
+    "gpu::GPUDialect",
+    "scf::SCFDialect",
+    "tensor::TensorDialect"
+  ];
+}
+
 def GPUCombineValueBarriersPass :
     Pass<"iree-codegen-gpu-combine-value-barriers", ""> {
   let summary = "Combines `iree_gpu.value_barrier` ops";
@@ -206,6 +226,22 @@ def GPUPromoteMatmulOperandsPass :
     "::mlir::gpu::GPUDialect",
     "::mlir::linalg::LinalgDialect",
     "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"
+  ];
+}
+
+def GPUAllocPrivateMemoryForDPSOpsPass :
+    InterfacePass<"iree-codegen-gpu-alloc-private-memory-for-dps-ops", "mlir::FunctionOpInterface"> {
+  let summary = "Pass to add private memory allocations prior to DPS interface ops.";
+  let description = [{
+    Creates a `bufferization.alloc_tensor` in private space for all DPS ops
+    with unused results that can't be removed. These unused results, if
+    originating from loads from global memory, trigger allocations in global
+    memory space during bufferization, which will fail. So, the allocations
+    must be made earlier to avoid failed bufferization.
+  }];
+  let dependentDialects = [
+    "::mlir::bufferization::BufferizationDialect",
+    "::mlir::gpu::GPUDialect"
   ];
 }
 

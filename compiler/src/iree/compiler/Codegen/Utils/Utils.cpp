@@ -1241,11 +1241,9 @@ Value findOrCreateSubspanBuffer(
 // Misc. utility functions
 //===---------------------------------------------------------------------===//
 
-Operation *
-setInsertionPointAfterLastNeededValue(OpBuilder &builder,
-                                      SubsetInsertionOpInterface subsetOp) {
+Operation *setInsertionPointAfterLastValue(OpBuilder &builder,
+                                           ArrayRef<Value> values) {
   DominanceInfo domInfo;
-  SmallVector<Value> values = subsetOp.getValuesNeededToBuildSubsetExtraction();
   Operation *lastOp = nullptr;
   bool setInsertionPointBefore = false;
   for (auto val : values) {
@@ -1254,7 +1252,16 @@ setInsertionPointAfterLastNeededValue(OpBuilder &builder,
       definingOp =
           &cast<BlockArgument>(val).getOwner()->getOperations().front();
     }
-    if (!definingOp || (lastOp && domInfo.dominates(definingOp, lastOp)))
+    if (!definingOp)
+      continue;
+    if (lastOp && definingOp == lastOp) {
+      // Combine 'setInsertionPointBefore' by ANDing because we only want to set
+      // the insertion point before the last op if all values this operation is
+      // derived from are block arguments.
+      setInsertionPointBefore &= isa<BlockArgument>(val);
+      continue;
+    }
+    if (lastOp && domInfo.dominates(definingOp, lastOp))
       continue;
     lastOp = definingOp;
 
@@ -1269,6 +1276,13 @@ setInsertionPointAfterLastNeededValue(OpBuilder &builder,
     builder.setInsertionPointAfter(lastOp);
   }
   return lastOp;
+}
+
+Operation *
+setInsertionPointAfterLastNeededValue(OpBuilder &builder,
+                                      SubsetInsertionOpInterface subsetOp) {
+  return setInsertionPointAfterLastValue(
+      builder, subsetOp.getValuesNeededToBuildSubsetExtraction());
 }
 
 bool equalTensorShape(RankedTensorType tensorType, ValueRange tensorDynSizes,
