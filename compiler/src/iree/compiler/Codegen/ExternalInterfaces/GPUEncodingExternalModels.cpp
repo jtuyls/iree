@@ -446,7 +446,8 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     auto gpuPadLayoutAttr = cast<GPUPadLayoutAttr>(attr);
 
     auto paddingEncodingAttr =
-        dyn_cast_or_null<IREE::Encoding::PadEncodingLayoutAttr>(type.getEncoding());
+        dyn_cast_or_null<IREE::Encoding::PadEncodingLayoutAttr>(
+            type.getEncoding());
     if (!paddingEncodingAttr) {
       return nullptr;
     }
