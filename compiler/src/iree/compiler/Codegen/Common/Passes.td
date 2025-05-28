@@ -381,11 +381,6 @@ def ForOpCanonicalizationPass :
       "Adhoc canonicalization of selected loop-carried values/dependencies for scf.for ops";
 }
 
-def FuseCollapseIntoStorePass :
-    InterfacePass<"iree-codegen-fuse-collapse-into-store", "mlir::FunctionOpInterface"> {
-  let summary = "TODOO";
-}
-
 def FuseTensorPadWithConsumerPass :
     InterfacePass<"iree-codegen-fuse-tensor-pad-with-consumer", "mlir::FunctionOpInterface"> {
   let summary = "Fuse tensor.pad op into its consumer op's tiled loop nest";

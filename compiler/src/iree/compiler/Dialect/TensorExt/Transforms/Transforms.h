@@ -18,6 +18,8 @@ namespace mlir::iree_compiler::IREE::TensorExt {
 void populateTensorSliceOpWithDispatchTensorOpFoldingPatterns(
     RewritePatternSet &results, MLIRContext *context);
 
-}; // namespace mlir::iree_compiler::IREE::TensorExt
+void populateFuseCollapseIntoStorePattern(RewritePatternSet &patterns);
+
+} // namespace mlir::iree_compiler::IREE::TensorExt
 
 #endif // IREE_COMPILER_DIALECT_TENSOREXT_TRANSFORMS_TRANSFORMS_H_

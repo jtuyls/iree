@@ -4,9 +4,10 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/Common/Passes.h"
-#include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/TensorExt/Transforms/Transforms.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
@@ -16,10 +17,10 @@
 
 #define DEBUG_TYPE "iree-codegen-fuse-collapse-into-store"
 
-namespace mlir::iree_compiler {
+namespace mlir::iree_compiler::IREE::TensorExt {
 
 #define GEN_PASS_DEF_FUSECOLLAPSEINTOSTOREPASS
-#include "iree/compiler/Codegen/Common/Passes.h.inc"
+#include "iree/compiler/Dialect/TensorExt/Transforms/Passes.h.inc"
 
 struct FuseCollapseIntoTensorStoreOp
     : public OpRewritePattern<IREE::TensorExt::DispatchTensorStoreOp> {
@@ -136,22 +137,22 @@ struct FuseCollapseIntoTensorStoreOp
   }
 };
 
-namespace {
-
-struct FuseCollapseIntoStorePass final
-    : impl::FuseCollapseIntoStorePassBase<FuseCollapseIntoStorePass> {
+struct FuseCollapseIntoStorePass final : impl::FuseCollapseIntoStorePassBase<FuseCollapseIntoStorePass> {
   void runOnOperation() override {
     MLIRContext *context = &getContext();
-    auto funcOp = getOperation();
+    auto operation = getOperation();
 
     LLVM_DEBUG(llvm::dbgs() << "REWRITE FuseCollapseIntoTensorStoreOp\n");
     RewritePatternSet patterns(context);
     patterns.add<FuseCollapseIntoTensorStoreOp>(context);
-    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(operation, std::move(patterns)))) {
       return signalPassFailure();
     }
   }
 };
 
-} // namespace
-} // namespace mlir::iree_compiler
+void populateFuseCollapseIntoStorePattern(RewritePatternSet &patterns) {
+  patterns.add<FuseCollapseIntoTensorStoreOp>(patterns.getContext());
+}
+
+} // mlir::iree_compiler::IREE::TensorExt
