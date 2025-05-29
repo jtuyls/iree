@@ -483,15 +483,20 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
       LLVM_DEBUG(llvm::dbgs() << "--rank diff\n");
       return nullptr;
     }
+    auto noPaddingAttr =
+        IREE::Encoding::PadEncodingLayoutAttr::getIdentityAttr(ctx, rank);
     // TODO: Support dynamic shape of the inner tensor size
     ArrayRef<int64_t> tensorShape = type.getShape();
     if (tensorShape.back() == ShapedType::kDynamic) {
+      // if (givenPadValues.back() == ShapedType::kDynamic) {
+      //   return paddingEncodingAttr;
+      // }
       LLVM_DEBUG(llvm::dbgs() << "--tensorshape dynamic\n");
-      return nullptr;
+      // return nullptr;
+      return noPaddingAttr;
     }
 
-    auto noPaddingAttr =
-        IREE::Encoding::PadEncodingLayoutAttr::getIdentityAttr(ctx, rank);
+    
     if (!gpuPadLayoutAttr.getCacheLineBytes() ||
         !gpuPadLayoutAttr.getCacheSets()) {
       LLVM_DEBUG(llvm::dbgs() << "--no cache line bytes or sets\n");

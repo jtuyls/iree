@@ -95,12 +95,15 @@ static Type getTypeWithResolvedEncodingLayouts(
     Type type, const SetVector<Attribute> &layoutResolvers) {
   LLVM_DEBUG(llvm::dbgs() << "getTypeWithResolvedEncodingLayouts\n");
   if (!isRecognizedEncodingType(type)) {
+    LLVM_DEBUG(llvm::dbgs() << "!isRecognizedEncodingType\n");
     return type;
   }
   auto rankedTensorType = dyn_cast<RankedTensorType>(type);
+  LLVM_DEBUG(llvm::dbgs() << "--rankedTensorType: " << rankedTensorType << "\n");
   auto encodingAttr =
       IREE::Encoding::getSerializableEncodingAttrInterface(rankedTensorType);
   if (encodingAttr.isSerialized()) {
+    LLVM_DEBUG(llvm::dbgs() << "isSerialized\n");
     return type;
   }
   if (!llvm::all_of(
@@ -114,6 +117,7 @@ static Type getTypeWithResolvedEncodingLayouts(
         cast<IREE::Encoding::EncodingLayoutResolverAttrInterface>(attr);
     Attribute layout = encodingLayoutAttr.getLayout(rankedTensorType);
     if (!layout) {
+      LLVM_DEBUG(llvm::dbgs() << "!layout\n");
       return nullptr;
     }
     LLVM_DEBUG(llvm::dbgs() << "layout: " << layout << "\n");
@@ -650,6 +654,7 @@ updateTensorSizeOfOp(RewriterBase &rewriter,
   Type newEncodingType =
       getTypeWithResolvedEncodingLayouts(encodingType, layoutResolvers);
   if (!newEncodingType) {
+    LLVM_DEBUG(llvm::dbgs() << "updateTensorSizeOfOp: " << sizeOfOp << "\n");
     return sizeOfOp.emitOpError("failed to resolve recognized layout");
   }
   rewriter.modifyOpInPlace(sizeOfOp,
