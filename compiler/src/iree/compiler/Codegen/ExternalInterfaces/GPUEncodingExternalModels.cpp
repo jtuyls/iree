@@ -526,6 +526,8 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
       return noPaddingAttr;
     }
 
+    // return noPaddingAttr;
+
     int64_t padBytes = 0;
     if (int64_t unalignedBytes = dimSizeInBytes % cacheLineBytes;
         unalignedBytes != 0) {

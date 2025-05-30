@@ -234,8 +234,10 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
             CloneProducersIntoDispatchRegionsPassOptions{
                 options.enableAggressiveFusion});
       })
+      .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
       // Collapse dimensions of linalg Ops.
       .addPass(DispatchCreation::createCollapseDimensionsPass);
+      // .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
 
   // Experimental data tiling path. The intent of this path is to set encodings
   // after fusion decisions have already been made, so encodings can be
