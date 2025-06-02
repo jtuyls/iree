@@ -75,7 +75,8 @@ struct ContractionAttrPropagationInterface
 // TODO(jtuyls): this might not be needed.
 struct PadEncodingAttrPropagationInterface
     : public IREE::Encoding::EncodingPropagationAttrInterface::ExternalModel<
-      PadEncodingAttrPropagationInterface, IREE::Encoding::PadEncodingLayoutAttr> {
+          PadEncodingAttrPropagationInterface,
+          IREE::Encoding::PadEncodingLayoutAttr> {
   bool isPropagable(Attribute attr, Value target) const {
     auto encoding = cast<IREE::Encoding::PadEncodingLayoutAttr>(attr);
     Operation *attachedToOperation = target.getDefiningOp();
@@ -105,34 +106,35 @@ struct PadEncodingAttrPropagationInterface
     return TypeSwitch<Operation *,
                       FailureOr<IREE::Encoding::PropagationEncoding>>(
                target.getDefiningOp())
-        .Case<tensor::CollapseShapeOp>([&](auto collapseOp) -> FailureOr<IREE::Encoding::PropagationEncoding> {
-          ArrayRef<int64_t> padding = encoding.getPadding().asArrayRef();
-          SmallVector<ReassociationIndices, 4> reassociationMaps =
-              collapseOp.getReassociationIndices();
-          // Get a mapping from original iteration space to expanded iteration
-          // space.
-          SmallVector<int64_t> newPadding;
-          for (auto [i, pad] : llvm::enumerate(padding)) {
-            if (pad != 0 && !ShapedType::isDynamic(pad)) {
-              return failure();
-            }
-            size_t nbVals = reassociationMaps[i].size();
-            newPadding.insert(newPadding.end(), nbVals, pad);
-          }
-          MLIRContext *ctx = collapseOp.getContext();
-          auto operandEncodingAttr =
-              IREE::Encoding::PadEncodingLayoutAttr::get(ctx, newPadding);
-          IREE::Encoding::PropagationEncoding propEncoding;
-          propEncoding.operandEncodings.push_back(operandEncodingAttr);
-          // The result encoding will be the same as the encoding
-          // present in the set encoding operation.
-          propEncoding.resultEncodings.push_back(encoding);
-          return propEncoding;
-        })
+        .Case<tensor::CollapseShapeOp>(
+            [&](auto collapseOp)
+                -> FailureOr<IREE::Encoding::PropagationEncoding> {
+              ArrayRef<int64_t> padding = encoding.getPadding().asArrayRef();
+              SmallVector<ReassociationIndices, 4> reassociationMaps =
+                  collapseOp.getReassociationIndices();
+              // Get a mapping from original iteration space to expanded
+              // iteration space.
+              SmallVector<int64_t> newPadding;
+              for (auto [i, pad] : llvm::enumerate(padding)) {
+                if (pad != 0 && !ShapedType::isDynamic(pad)) {
+                  return failure();
+                }
+                size_t nbVals = reassociationMaps[i].size();
+                newPadding.insert(newPadding.end(), nbVals, pad);
+              }
+              MLIRContext *ctx = collapseOp.getContext();
+              auto operandEncodingAttr =
+                  IREE::Encoding::PadEncodingLayoutAttr::get(ctx, newPadding);
+              IREE::Encoding::PropagationEncoding propEncoding;
+              propEncoding.operandEncodings.push_back(operandEncodingAttr);
+              // The result encoding will be the same as the encoding
+              // present in the set encoding operation.
+              propEncoding.resultEncodings.push_back(encoding);
+              return propEncoding;
+            })
         .Default([&](auto) { return failure(); });
   }
 };
-
 
 struct ContractionOpPropagationInterface
     : public IREE::Encoding::EncodingPropagationOpInterface::ExternalModel<

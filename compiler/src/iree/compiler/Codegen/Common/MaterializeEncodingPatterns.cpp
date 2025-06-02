@@ -675,7 +675,7 @@ struct MaterializeCollapseShapeOp
 
   LogicalResult
   matchAndRewrite(tensor::CollapseShapeOp op,
-    tensor::CollapseShapeOp::Adaptor adaptor,
+                  tensor::CollapseShapeOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     LLVM_DEBUG(llvm::dbgs() << "MaterializeCollapseShapeOp\n");
     auto tensorType = dyn_cast<RankedTensorType>(op.getType());
@@ -957,8 +957,7 @@ void populateMaterializeEncodingPatterns(
                   MaterializeDPSOperation<linalg::FillOp>,
                   MaterializeDPSOperation<linalg::GenericOp>,
                   MaterializeOperation<tensor::EmptyOp>,
-                  MaterializeOptimizationBarrierOp,
-                  MaterializeCollapseShapeOp,
+                  MaterializeOptimizationBarrierOp, MaterializeCollapseShapeOp,
                   MaterializeTensorExtDispatchTensorLoadOp,
                   MaterializeTensorExtDispatchTensorStoreOp,
                   MaterializeInterfaceBindingEncoding>(typeConverter, context);

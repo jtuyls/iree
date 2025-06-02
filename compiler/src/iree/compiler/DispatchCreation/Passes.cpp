@@ -242,7 +242,7 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
       .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
       // Collapse dimensions of linalg Ops.
       .addPass(DispatchCreation::createCollapseDimensionsPass);
-      // .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
+  // .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
 
   // Experimental data tiling path. The intent of this path is to set encodings
   // after fusion decisions have already been made, so encodings can be
@@ -262,7 +262,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
           return DispatchCreation::createSetEncodingPass(
               DispatchCreation::SetEncodingPassOptions{clSetEncodingStrategy});
         })
-        // The SetEncodingPass can insert expand/collapse shapes into dispatch regions.
+        // The SetEncodingPass can insert expand/collapse shapes into dispatch
+        // regions.
         .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
         // SetEncodingOps should not be in the same dispatch as the data-tiled
         // op, so hoist them out of their current dispatch regions. Also, bubble
@@ -275,8 +276,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
         .addPass(DispatchCreation::createPropagateEncodingsPass)
         .addPass(
             DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass);
-        // The SetEncodingPass can insert expand/collapse shapes into dispatch regions.
-        // .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
+    // The SetEncodingPass can insert expand/collapse shapes into dispatch
+    // regions. .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
   }
   FunctionLikeNest(passManager)
       .addPass(DispatchCreation::createConvertEncodingToFlowPass);

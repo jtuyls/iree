@@ -53,8 +53,8 @@ LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
           encodingOp.getResultType().getEncoding());
   if (!propagationAttrInterface ||
       !propagationAttrInterface.isPropagable(target)) {
-        // llvm::outs() << "NOT isPropagable\n";
-        // llvm::outs() << "target: " << target << "\n";
+    // llvm::outs() << "NOT isPropagable\n";
+    // llvm::outs() << "target: " << target << "\n";
     return rewriter.notifyMatchFailure(
         encodingOp, "the propagation attribute interface isn't defined or the "
                     "target isn't propagable");

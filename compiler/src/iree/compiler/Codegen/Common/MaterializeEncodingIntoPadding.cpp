@@ -202,7 +202,8 @@ struct MaterializeFlowDispatchTensorStoreOp final
     // `!iree_tensor_ext.dispatch.tensor` type.
     // if (!storeOp.isStoreToWholeTarget()) {
     //   LLVM_DEBUG(llvm::dbgs() << "STORE unhandled partial stores\n");
-    //   return rewriter.notifyMatchFailure(storeOp, "unhandled partial stores");
+    //   return rewriter.notifyMatchFailure(storeOp, "unhandled partial
+    //   stores");
     // }
 
     auto &typeConverter =
@@ -313,7 +314,8 @@ struct MaterializeEncodingIntoPaddingPass final
       }
     }
 
-    LLVM_DEBUG(llvm::dbgs() << "AFTER FuseCollapseIntoTensorStoreOp: " << operation << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "AFTER FuseCollapseIntoTensorStoreOp: " << operation << "\n");
 
     // Retrieve the config from executable target attribute, if any. Otherwise,
     // retrieve the config from CLI GPU target and construct a virtual

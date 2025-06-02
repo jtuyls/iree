@@ -440,13 +440,16 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
       LLVM_DEBUG(llvm::dbgs() << "MO CACHE\n");
       return GPUPadLayoutAttr::get(ctx, std::nullopt, std::nullopt);
     }
-    LLVM_DEBUG(llvm::dbgs() << "cache->cacheLineBytes: " << cache->cacheLineBytes << "\n");
-    LLVM_DEBUG(llvm::dbgs() << "cache->cacheSets: " << cache->cacheSets << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "cache->cacheLineBytes: " << cache->cacheLineBytes << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "cache->cacheSets: " << cache->cacheSets << "\n");
     return GPUPadLayoutAttr::get(ctx, cache->cacheLineBytes, cache->cacheSets);
   }
 
   Attribute getLayout(Attribute attr, RankedTensorType type) const {
-    LLVM_DEBUG(llvm::dbgs() << "GPUPadEncodingLayoutResolverAttrInterface getLayout\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "GPUPadEncodingLayoutResolverAttrInterface getLayout\n");
     MLIRContext *ctx = attr.getContext();
     auto gpuPadLayoutAttr = cast<GPUPadLayoutAttr>(attr);
 
@@ -455,7 +458,7 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
         IREE::Encoding::PadEncodingLayoutAttr::getIdentityAttr(ctx, rank);
     if (!gpuPadLayoutAttr.getCacheLineBytes() ||
         !gpuPadLayoutAttr.getCacheSets()) {
-          LLVM_DEBUG(llvm::dbgs() << "--no cache line bytes or sets\n");
+      LLVM_DEBUG(llvm::dbgs() << "--no cache line bytes or sets\n");
       return noPaddingAttr;
     }
 
@@ -508,7 +511,8 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     const int64_t cacheLineBytes = *gpuPadLayoutAttr.getCacheLineBytes();
     if (elementBits % 8 != 0 || elementBits > cacheLineBytes) {
       // We do not support unaligned element types.
-      LLVM_DEBUG(llvm::dbgs() << "--elementBits % 8 != 0 || elementBits > cacheLineBytes\n");
+      LLVM_DEBUG(llvm::dbgs()
+                 << "--elementBits % 8 != 0 || elementBits > cacheLineBytes\n");
       return noPaddingAttr;
     }
 
@@ -520,9 +524,11 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
         *gpuPadLayoutAttr.getCacheSets() * cacheLineBytes;
     const int64_t dimSizeInBytes = tensorShape.back() * (elementBits / 8);
     LLVM_DEBUG(llvm::dbgs() << "--dimSizeInBytes: " << dimSizeInBytes << "\n");
-    LLVM_DEBUG(llvm::dbgs() << "--cacheSetSpanBytes: " << cacheSetSpanBytes << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "--cacheSetSpanBytes: " << cacheSetSpanBytes << "\n");
     if (dimSizeInBytes < cacheSetSpanBytes) {
-      LLVM_DEBUG(llvm::dbgs() << "--dimSizeInBytes < cacheSetSpanBytes: << " << (dimSizeInBytes < cacheSetSpanBytes) << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "--dimSizeInBytes < cacheSetSpanBytes: << "
+                              << (dimSizeInBytes < cacheSetSpanBytes) << "\n");
       // Very small dimension, leave as-is.
       return noPaddingAttr;
     }
@@ -532,7 +538,8 @@ struct GPUPadEncodingLayoutResolverAttrInterface final
     int64_t padBytes = 0;
     if (int64_t unalignedBytes = dimSizeInBytes % cacheLineBytes;
         unalignedBytes != 0) {
-          LLVM_DEBUG(llvm::dbgs() << "--unalignedBytes: " << unalignedBytes << "\n");
+      LLVM_DEBUG(llvm::dbgs()
+                 << "--unalignedBytes: " << unalignedBytes << "\n");
       // First, pad to the multiple of cache lines.
       padBytes += cacheLineBytes - unalignedBytes;
     }

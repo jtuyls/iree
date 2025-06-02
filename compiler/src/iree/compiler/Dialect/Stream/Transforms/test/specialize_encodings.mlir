@@ -1187,4 +1187,3 @@ util.func public @test_dispatch_dynamic(%arg0: !stream.resource<external>, %arg1
   %1 = stream.tensor.dispatch on(#hal.device.affinity<@device_a>) @executable::@dispatch(%0, %arg3) : (tensor<?x1024xf32, #encodingB>{%arg2} in !stream.resource<*>{%arg1}, index) -> tensor<?x1024xf32, #encodingB>{%arg2} in %0{%arg1}
   util.return %1 : !stream.resource<*>
 }
-

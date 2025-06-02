@@ -27,28 +27,33 @@ struct FuseCollapseIntoTensorStoreOp
   using OpRewritePattern<
       IREE::TensorExt::DispatchTensorStoreOp>::OpRewritePattern;
 
-  LogicalResult
-  matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
-                  PatternRewriter &rewriter) const override {
-    LLVM_DEBUG(llvm::dbgs() << "FuseCollapseIntoTensorStoreOp: " << storeOp << "\n");
+  LogicalResult matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp storeOp,
+                                PatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs()
+               << "FuseCollapseIntoTensorStoreOp: " << storeOp << "\n");
     // if (!storeOp.isStoreToWholeTarget()) {
-    //   return rewriter.notifyMatchFailure(storeOp, "unhandled partial stores");
+    //   return rewriter.notifyMatchFailure(storeOp, "unhandled partial
+    //   stores");
     // }
-    auto collapseOp = dyn_cast_if_present<tensor::CollapseShapeOp>(storeOp.getValue().getDefiningOp());
+    auto collapseOp = dyn_cast_if_present<tensor::CollapseShapeOp>(
+        storeOp.getValue().getDefiningOp());
     if (!collapseOp) {
-      return rewriter.notifyMatchFailure(storeOp, "expected `tensor.collapse_shape` source");
+      return rewriter.notifyMatchFailure(
+          storeOp, "expected `tensor.collapse_shape` source");
     }
     RankedTensorType srcType = collapseOp.getSrcType();
     RankedTensorType collapseType = collapseOp.getResultType();
     SmallVector<ReassociationIndices, 4> reassociationMaps =
-              collapseOp.getReassociationIndices();
+        collapseOp.getReassociationIndices();
 
-    auto subspanOp = dyn_cast_if_present<IREE::Stream::BindingSubspanOp>(storeOp.getTarget().getDefiningOp());
+    auto subspanOp = dyn_cast_if_present<IREE::Stream::BindingSubspanOp>(
+        storeOp.getTarget().getDefiningOp());
     if (!subspanOp) {
-      return rewriter.notifyMatchFailure(storeOp, "expected `hal.interface.binding.subspan` target");
+      return rewriter.notifyMatchFailure(
+          storeOp, "expected `hal.interface.binding.subspan` target");
     }
     auto resultType = dyn_cast<IREE::TensorExt::DispatchTensorType>(
-      subspanOp.getResult().getType());
+        subspanOp.getResult().getType());
     if (!resultType) {
       LLVM_DEBUG(
           llvm::dbgs()
@@ -62,33 +67,36 @@ struct FuseCollapseIntoTensorStoreOp
     rewriter.setInsertionPoint(subspanOp);
     ArrayRef<int64_t> srcShape = srcType.getShape();
     ArrayRef<int64_t> resultShape = resultType.getShape();
-    
+
     auto newResultType = IREE::TensorExt::DispatchTensorType::get(
-      resultType.getAccess(), srcType);
+        resultType.getAccess(), srcType);
     LLVM_DEBUG(llvm::dbgs() << "--newResultType: " << newResultType << "\n");
     SmallVector<Value> dynamicDims = subspanOp.getDynamicDims();
     LLVM_DEBUG(llvm::dbgs() << "--dynamicDims: " << dynamicDims.size() << "\n");
     SmallVector<Value> newSubspanDynamicDims;
     size_t dynIndex = 0;
     for (auto [i, dim] : llvm::enumerate(resultShape)) {
-      if (!ShapedType::isDynamic(dim)) continue;
+      if (!ShapedType::isDynamic(dim))
+        continue;
       ReassociationIndices reassoc = reassociationMaps[i];
       int64_t staticVal = 1;
       bool foundDynamic = false;
       for (int64_t reassocIndex : reassoc) {
         int64_t srcDim = srcShape[reassocIndex];
         if (ShapedType::isDynamic(srcDim)) {
-          if (foundDynamic) return failure();
+          if (foundDynamic)
+            return failure();
           foundDynamic = true;
         } else {
           staticVal *= srcDim;
         }
       }
-      AffineExpr result = rewriter.getAffineDimExpr(0).floorDiv(rewriter.getAffineConstantExpr(staticVal));
+      AffineExpr result = rewriter.getAffineDimExpr(0).floorDiv(
+          rewriter.getAffineConstantExpr(staticVal));
       AffineMap map = AffineMap::get(1, 0, result);
-      
+
       auto newDynamicDim = rewriter.create<mlir::affine::AffineApplyOp>(
-        loc, map, ValueRange{dynamicDims[dynIndex]});
+          loc, map, ValueRange{dynamicDims[dynIndex]});
       newSubspanDynamicDims.push_back(newDynamicDim);
       dynIndex++;
     }
@@ -96,11 +104,10 @@ struct FuseCollapseIntoTensorStoreOp
         subspanOp, newResultType, subspanOp.getBinding(),
         subspanOp.getByteOffset(), newSubspanDynamicDims);
     // LLVM_DEBUG(llvm::dbgs() << "--success\n");
-    
+
     LLVM_DEBUG(llvm::dbgs() << "BEFORE EXPAND\n");
     rewriter.setInsertionPoint(storeOp);
 
-    
     // IREE::TensorExt::DispatchTensorType targetType = storeOp.getTargetType();
     // auto expandShapeType = IREE::TensorExt::DispatchTensorType::get(
     //   targetType.getAccess(), srcType);
@@ -109,8 +116,10 @@ struct FuseCollapseIntoTensorStoreOp
 
     // LLVM_DEBUG(llvm::dbgs() << "BEFORE OFFSETS\n");
 
-    SmallVector<OpFoldResult> newOffsets(srcType.getRank(), rewriter.getIndexAttr(0));
-    SmallVector<OpFoldResult> newStrides(srcType.getRank(), rewriter.getIndexAttr(1));
+    SmallVector<OpFoldResult> newOffsets(srcType.getRank(),
+                                         rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> newStrides(srcType.getRank(),
+                                         rewriter.getIndexAttr(1));
     // SmallVector<OpFoldResult> newMixedSizes =
     //     tensor::getMixedSizes(rewriter, loc, collapseOp.getSrc());
     SmallVector<OpFoldResult> newMixedSizes;
@@ -123,7 +132,8 @@ struct FuseCollapseIntoTensorStoreOp
         newMixedSizes.push_back(rewriter.getIndexAttr(dim));
       }
     }
-    LLVM_DEBUG(llvm::dbgs() << "newMixedSizes: " << newMixedSizes.size() << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "newMixedSizes: " << newMixedSizes.size() << "\n");
     SmallVector<int64_t> newStaticDims;
     SmallVector<Value> newDynamicDims;
     dispatchIndexOpFoldResults(newMixedSizes, newDynamicDims, newStaticDims);
@@ -136,12 +146,14 @@ struct FuseCollapseIntoTensorStoreOp
   }
 };
 
-struct FuseCollapseIntoStorePass final : impl::FuseCollapseIntoStorePassBase<FuseCollapseIntoStorePass> {
+struct FuseCollapseIntoStorePass final
+    : impl::FuseCollapseIntoStorePassBase<FuseCollapseIntoStorePass> {
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     auto operation = getOperation();
 
-    LLVM_DEBUG(llvm::dbgs() << "REWRITE STREAM FuseCollapseIntoTensorStoreOp\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "REWRITE STREAM FuseCollapseIntoTensorStoreOp\n");
     RewritePatternSet patterns(context);
     patterns.add<FuseCollapseIntoTensorStoreOp>(context);
     if (failed(applyPatternsGreedily(operation, std::move(patterns)))) {
@@ -150,4 +162,4 @@ struct FuseCollapseIntoStorePass final : impl::FuseCollapseIntoStorePassBase<Fus
   }
 };
 
-} // mlir::iree_compiler::IREE::Stream
+} // namespace mlir::iree_compiler::IREE::Stream

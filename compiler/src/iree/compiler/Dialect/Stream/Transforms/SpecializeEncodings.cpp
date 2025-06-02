@@ -99,7 +99,8 @@ static Type getTypeWithResolvedEncodingLayouts(
     return type;
   }
   auto rankedTensorType = dyn_cast<RankedTensorType>(type);
-  LLVM_DEBUG(llvm::dbgs() << "--rankedTensorType: " << rankedTensorType << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--rankedTensorType: " << rankedTensorType
+                          << "\n");
   auto encodingAttr =
       IREE::Encoding::getSerializableEncodingAttrInterface(rankedTensorType);
   if (encodingAttr.isSerialized()) {

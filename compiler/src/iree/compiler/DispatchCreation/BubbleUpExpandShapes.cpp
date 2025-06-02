@@ -136,9 +136,11 @@ struct BubbleExpandThroughExtract final
 //     if (!loadOp)
 //       return failure();
 
-//     // Make sure we are loading the full incoming subspan. Otherwise we cannot
+//     // Make sure we are loading the full incoming subspan. Otherwise we
+//     cannot
 //     // simply adjust the subspan's resultant type later.
-//     if (!isFullSlice(loadOp, loadOp.getSourceType(), loadOp.getSourceDims())) {
+//     if (!isFullSlice(loadOp, loadOp.getSourceType(), loadOp.getSourceDims()))
+//     {
 //       return failure();
 //     }
 
@@ -163,7 +165,8 @@ struct BubbleExpandThroughExtract final
 //     auto newSubspanType = IREE::TensorExt::DispatchTensorType::get(
 //         tensorAccess, reshapeOp.getResultType());
 
-//     Value newSubspanOp = rewriter.create<IREE::HAL::InterfaceBindingSubspanOp>(
+//     Value newSubspanOp =
+//     rewriter.create<IREE::HAL::InterfaceBindingSubspanOp>(
 //         subspanOp.getLoc(), newSubspanType, subspanOp.getLayout(),
 //         subspanOp.getBinding(), subspanOp.getByteOffset(),
 //         collapsedDynamicShape, subspanOp.getAlignmentAttr(),
