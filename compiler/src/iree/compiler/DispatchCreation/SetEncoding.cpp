@@ -744,10 +744,10 @@ SmallVector<unsigned> getOperandsToPad(Operation *op) {
       regionOp->walk(
           [&](IREE::LinalgExt::AttentionOp op) { containsAttention = true; });
     }
-    if (containsAttention) {
-      llvm::outs() << "containsAttention!!\n";
-      return {};
-    }
+    // if (containsAttention) {
+    //   llvm::outs() << "containsAttention!!\n";
+    //   return {};
+    // }
   }
 
   // Bail out on matvec / vecmat and skinny matmul problems.
