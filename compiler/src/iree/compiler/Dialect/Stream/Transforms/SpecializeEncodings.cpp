@@ -91,16 +91,12 @@ static bool isRecognizedEncodingType(Type type) {
 ///     there is no way to update encodings.
 static Type getTypeWithResolvedEncodingLayouts(
     Type type, const SetVector<Attribute> &layoutResolvers) {
-  LLVM_DEBUG(llvm::dbgs() << "getTypeWithResolvedEncodingLayouts\n");
   if (!isRecognizedEncodingType(type)) {
-    LLVM_DEBUG(llvm::dbgs() << "!isRecognizedEncodingType\n");
     return type;
   }
   auto rankedTensorType = dyn_cast<RankedTensorType>(type);
-  LLVM_DEBUG(llvm::dbgs() << "--rankedTensorType: " << rankedTensorType << "\n");
   auto encodingAttr = IREE::Encoding::getSerializableAttr(rankedTensorType);
   if (encodingAttr.isSerialized()) {
-    LLVM_DEBUG(llvm::dbgs() << "isSerialized\n");
     return type;
   }
   if (!llvm::all_of(layoutResolvers,
@@ -112,15 +108,11 @@ static Type getTypeWithResolvedEncodingLayouts(
     auto encodingLayoutAttr = cast<IREE::Encoding::LayoutResolverAttr>(attr);
     Attribute layout = encodingLayoutAttr.getLayout(rankedTensorType);
     if (!layout) {
-      LLVM_DEBUG(llvm::dbgs() << "!layout\n");
       return nullptr;
     }
-    LLVM_DEBUG(llvm::dbgs() << "layout: " << layout << "\n");
     layouts.push_back(layout);
   }
-  LLVM_DEBUG(llvm::dbgs() << "encodingAttr: " << encodingAttr << "\n");
   Attribute newEncoding = encodingAttr.cloneWithLayouts(layouts);
-  LLVM_DEBUG(llvm::dbgs() << "newEncoding: " << newEncoding << "\n");
   assert(isa<IREE::Encoding::SerializableAttr>(newEncoding));
   return rankedTensorType.cloneWithEncoding(newEncoding);
 };
@@ -584,7 +576,6 @@ static LogicalResult updateTensorDispatchOp(
     const SetVector<Attribute> &resLayoutResolvers,
     llvm::DenseMap<IREE::Stream::AffinityAndOpPair, SetVector<Attribute>>
         &cachedLayoutAttrs) {
-  LLVM_DEBUG(llvm::dbgs() << "updateTensorDispatchOp\n");
   SmallVector<Type> newOperandEncodings;
   for (auto [operand, typeAttr] :
        llvm::zip_equal(dispatchOp.getMixedOperands(),
@@ -646,7 +637,6 @@ updateTensorSizeOfOp(RewriterBase &rewriter,
   Type newEncodingType =
       getTypeWithResolvedEncodingLayouts(encodingType, layoutResolvers);
   if (!newEncodingType) {
-    LLVM_DEBUG(llvm::dbgs() << "updateTensorSizeOfOp: " << sizeOfOp << "\n");
     return sizeOfOp.emitOpError("failed to resolve recognized layout");
   }
   rewriter.modifyOpInPlace(sizeOfOp,

@@ -669,25 +669,6 @@ struct MaterializeOptimizationBarrierOp
   }
 };
 
-struct MaterializeCollapseShapeOp
-    : public OpConversionPattern<tensor::CollapseShapeOp> {
-  using OpConversionPattern<tensor::CollapseShapeOp>::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(tensor::CollapseShapeOp op,
-                  tensor::CollapseShapeOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    LLVM_DEBUG(llvm::dbgs() << "MaterializeCollapseShapeOp\n");
-    auto tensorType = dyn_cast<RankedTensorType>(op.getType());
-    if (tensorType && !tensorType.getEncoding()) {
-      return rewriter.notifyMatchFailure(op, "no encoding in type");
-    }
-    rewriter.replaceOpWithNewOp<tensor::CollapseShapeOp>(
-        op, adaptor.getSrc(), op.getReassociationIndices());
-    return success();
-  }
-};
-
 static SmallVector<ReassociationIndices>
 getReassociationIndices(int outerDims,
                         const TileSwizzle::ExpandShapeType &expandShape) {
@@ -718,18 +699,18 @@ struct SetEncodingOpLoweringConversion
                << "SetEncodingOpLoweringConversion: " << encodingOp << "\n");
     auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
         getTypeConverter());
-    RankedTensorType resultType = encodingOp.getResultType();
-    if (resultType && isa_and_nonnull<IREE::Encoding::PadEncodingLayoutAttr>(
-                          resultType.getEncoding())) {
-      LLVM_DEBUG(llvm::dbgs() << "PadEncodingLayoutAttr\n");
-      rewriter.replaceOp(encodingOp, adaptor.getSource());
-      // Type targetType =
-      //     getTypeConverter()->convertType(encodingOp.getResultType());
-      // Value result = rewriter.createOrFold<tensor::CastOp>(
-      //     encodingOp.getLoc(), targetType, adaptor.getSource());
-      // rewriter.replaceOp(encodingOp, result);
-      return success();
-    }
+    // RankedTensorType resultType = encodingOp.getResultType();
+    // if (resultType && isa_and_nonnull<IREE::Encoding::PadEncodingLayoutAttr>(
+    //                       resultType.getEncoding())) {
+    //   LLVM_DEBUG(llvm::dbgs() << "PadEncodingLayoutAttr\n");
+    //   rewriter.replaceOp(encodingOp, adaptor.getSource());
+    //   // Type targetType =
+    //   //     getTypeConverter()->convertType(encodingOp.getResultType());
+    //   // Value result = rewriter.createOrFold<tensor::CastOp>(
+    //   //     encodingOp.getLoc(), targetType, adaptor.getSource());
+    //   // rewriter.replaceOp(encodingOp, result);
+    //   return success();
+    // }
 
     auto packedValue = lowerSetEncodingOpToPackOp(
         rewriter, encodingOp, adaptor.getSource(), *converter);
@@ -917,19 +898,13 @@ void populateMaterializeEncodingPatterns(
   MLIRContext *context = patterns.getContext();
   target.addDynamicallyLegalOp<IREE::HAL::InterfaceBindingSubspanOp>(
       [&typeConverter](IREE::HAL::InterfaceBindingSubspanOp subspanOp) {
-        LLVM_DEBUG(llvm::dbgs() << "addDynamicallyLegalOp SubspanOp\n");
         auto resultType = llvm::dyn_cast<IREE::TensorExt::DispatchTensorType>(
             subspanOp.getResult().getType());
-        LLVM_DEBUG(llvm::dbgs() << "--resultType: " << resultType << "\n");
         // For types that are not `TensorExt::DispatchTensorType` mark as legal.
         if (!resultType)
           return true;
 
         auto convertedType = typeConverter.convertType(resultType);
-        LLVM_DEBUG(llvm::dbgs()
-                   << "--convertedType: " << convertedType << "\n");
-        LLVM_DEBUG(llvm::dbgs()
-                   << "--equal: " << (resultType == convertedType) << "\n");
         return resultType == convertedType;
       });
   target.addIllegalOp<IREE::Encoding::SetEncodingOp,
@@ -958,7 +933,7 @@ void populateMaterializeEncodingPatterns(
                   MaterializeDPSOperation<linalg::FillOp>,
                   MaterializeDPSOperation<linalg::GenericOp>,
                   MaterializeOperation<tensor::EmptyOp>,
-                  MaterializeOptimizationBarrierOp, MaterializeCollapseShapeOp,
+                  MaterializeOptimizationBarrierOp,
                   MaterializeTensorExtDispatchTensorLoadOp,
                   MaterializeTensorExtDispatchTensorStoreOp,
                   MaterializeInterfaceBindingEncoding>(typeConverter, context);

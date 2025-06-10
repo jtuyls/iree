@@ -232,15 +232,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
             CloneProducersIntoDispatchRegionsPassOptions{
                 options.enableAggressiveFusion});
       })
-      .addPass([&]() {
-        IREE::Flow::CanonicalizePassOptions options;
-        options.cseConstants = false;
-        return IREE::Flow::createCanonicalizePass(options);
-      })
-      .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
       // Collapse dimensions of linalg Ops.
       .addPass(DispatchCreation::createCollapseDimensionsPass);
-  // .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
 
   // Experimental data tiling path. The intent of this path is to set encodings
   // after fusion decisions have already been made, so encodings can be
@@ -274,8 +267,6 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
         .addPass(DispatchCreation::createPropagateEncodingsPass)
         .addPass(
             DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass);
-    // The SetEncodingPass can insert expand/collapse shapes into dispatch
-    // regions. .addPass(DispatchCreation::createBubbleUpExpandShapesPass);
   }
   FunctionLikeNest(passManager)
       .addPass(DispatchCreation::createConvertEncodingToFlowPass);

@@ -118,7 +118,7 @@ def IREEEncoding_SerializableAttr :
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         assert(false && "unimplemented interface method");
-        return false;
+        return true;
       }]
     >,
     InterfaceMethod<

@@ -46,20 +46,16 @@ struct PropagateEncodingsPass
 
 LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
     IREE::Encoding::SetEncodingOp encodingOp, PatternRewriter &rewriter) const {
-  // llvm::outs() << "SwapEncodingOpWithTensorCollapseShapeOp\n";
   Value target = encodingOp.getSource();
   auto propagationAttrInterface =
       dyn_cast<IREE::Encoding::EncodingPropagationAttrInterface>(
           encodingOp.getResultType().getEncoding());
   if (!propagationAttrInterface ||
       !propagationAttrInterface.isPropagable(target)) {
-    // llvm::outs() << "NOT isPropagable\n";
-    // llvm::outs() << "target: " << target << "\n";
     return rewriter.notifyMatchFailure(
         encodingOp, "the propagation attribute interface isn't defined or the "
                     "target isn't propagable");
   }
-  // llvm::outs() << "BEFORE propagationEncodings\n";
   // Get the encoding attributes for the operands and results of the operation.
   FailureOr<IREE::Encoding::PropagationEncoding> propagationEncodings =
       propagationAttrInterface.generateEncodings(target);
@@ -70,22 +66,15 @@ LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
   }
   auto collapseOp =
       encodingOp.getSource().getDefiningOp<tensor::CollapseShapeOp>();
-  llvm::outs() << "collapseOp: " << collapseOp << "\n";
   if (!collapseOp) {
     return rewriter.notifyMatchFailure(encodingOp,
                                        "expected a collapse_shape producer");
   }
-  if (!encodingOp || !collapseOp) {
-    llvm::outs() << "expected that both operations are non-null\n";
+  if (!IREE::Flow::isNonNullAndOutsideDispatch(encodingOp) ||
+      !IREE::Flow::isNonNullAndOutsideDispatch(collapseOp)) {
     return rewriter.notifyMatchFailure(
-        encodingOp, "expected that both operations are non-null");
+        encodingOp, "expected that both operations are outside dispatch");
   }
-  // if (!IREE::Flow::isNonNullAndOutsideDispatch(encodingOp) ||
-  //     !IREE::Flow::isNonNullAndOutsideDispatch(collapseOp)) {
-  //   llvm::outs() << "expected that both operations are outside dispatch\n";
-  //   return rewriter.notifyMatchFailure(
-  //       encodingOp, "expected that both operations are outside dispatch");
-  // }
   auto propagationResult =
       dyn_cast<IREE::Encoding::EncodingPropagationOpInterface>(
           collapseOp.getOperation());
