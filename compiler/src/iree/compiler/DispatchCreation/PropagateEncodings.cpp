@@ -70,8 +70,12 @@ LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
     return rewriter.notifyMatchFailure(encodingOp,
                                        "expected a collapse_shape producer");
   }
-  if (!IREE::Flow::isNonNullAndOutsideDispatch(encodingOp) ||
-      !IREE::Flow::isNonNullAndOutsideDispatch(collapseOp)) {
+  // if (!IREE::Flow::isNonNullAndOutsideDispatch(encodingOp) ||
+  //     !IREE::Flow::isNonNullAndOutsideDispatch(collapseOp)) {
+  //   return rewriter.notifyMatchFailure(
+  //       encodingOp, "expected that both operations are outside dispatch");
+  // }
+  if (!encodingOp || !collapseOp) {
     return rewriter.notifyMatchFailure(
         encodingOp, "expected that both operations are outside dispatch");
   }
@@ -82,6 +86,7 @@ LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         encodingOp, "encoding propagation op interface isn't defined");
   }
+  LLVM_DEBUG(llvm::dbgs() << "propagateEncoding: " << encodingOp << "\n");
   // Propagate the set encoding and generate the new encoding operations.
   FailureOr<IREE::Encoding::PropagationResult> maybeResult =
       propagationResult.propagateEncoding(

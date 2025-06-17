@@ -19,6 +19,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -276,6 +277,19 @@ struct MaterializeEncodingIntoPaddingPass final
     MLIRContext *context = &getContext();
     FunctionOpInterface operation = getOperation();
 
+    // {
+    //   LLVM_DEBUG(llvm::dbgs() << "REWRITE FuseCollapseIntoTensorStoreOp\n");
+    //   RewritePatternSet patterns(context);
+    //   IREE::TensorExt::populateFuseCollapseIntoStorePattern(patterns);
+    //   // patterns.add<FuseCollapseIntoTensorStoreOp>(context);
+    //   if (failed(applyPatternsGreedily(operation, std::move(patterns)))) {
+    //     return signalPassFailure();
+    //   }
+    // }
+
+    LLVM_DEBUG(llvm::dbgs()
+               << "AFTER FuseCollapseIntoTensorStoreOp: " << operation << "\n");
+
     // Retrieve the config from executable target attribute, if any. Otherwise,
     // retrieve the config from CLI GPU target and construct a virtual
     // configuration.
@@ -327,6 +341,7 @@ struct MaterializeEncodingIntoPaddingPass final
 
     if (failed(applyPartialConversion(operation, target,
                                       std::move(materializeEncodingPattern)))) {
+      LLVM_DEBUG(llvm::dbgs() << "AFTER conversion: " << operation << "\n");
       operation.emitOpError("materialization failed");
       return signalPassFailure();
     }

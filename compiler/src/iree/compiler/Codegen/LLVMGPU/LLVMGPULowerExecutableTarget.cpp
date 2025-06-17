@@ -98,6 +98,10 @@ void LLVMGPULowerExecutableTargetPass::runOnOperation() {
   IREE::GPU::GPUPipelineOptions pipelineOptions =
       IREE::GPU::getPipelineOptions(funcOp, translationInfo);
 
+  LLVM_DEBUG(llvm::dbgs() << "PIPELINE: "
+                          << translationInfo.getDispatchLoweringPassPipeline()
+                          << "\n");
+
   switch (translationInfo.getDispatchLoweringPassPipeline()) {
   case IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUDefault:
     addGPUDefaultPassPipeline(pipeline, pipelineOptions);

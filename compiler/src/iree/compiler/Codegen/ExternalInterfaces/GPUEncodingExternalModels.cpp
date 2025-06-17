@@ -438,12 +438,19 @@ struct GPUPadLayoutResolverAttr final
     std::optional<IREE::GPU::L1CacheInfo> cache =
         IREE::GPU::getL1CacheInfo(gpuTarget);
     if (!cache) {
+      LLVM_DEBUG(llvm::dbgs() << "MO CACHE\n");
       return GPUPadLayoutAttr::get(ctx, std::nullopt, std::nullopt);
     }
+    LLVM_DEBUG(llvm::dbgs()
+               << "cache->cacheLineBytes: " << cache->cacheLineBytes << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "cache->cacheSets: " << cache->cacheSets << "\n");
     return GPUPadLayoutAttr::get(ctx, cache->cacheLineBytes, cache->cacheSets);
   }
 
   Attribute getLayout(Attribute attr, RankedTensorType type) const {
+    LLVM_DEBUG(llvm::dbgs()
+               << "GPUPadEncodingLayoutResolverAttrInterface getLayout\n");
     MLIRContext *ctx = attr.getContext();
     auto gpuPadLayoutAttr = cast<GPUPadLayoutAttr>(attr);
 
@@ -452,6 +459,7 @@ struct GPUPadLayoutResolverAttr final
         IREE::Encoding::PadEncodingLayoutAttr::getIdentityAttr(ctx, rank);
     if (!gpuPadLayoutAttr.getCacheLineBytes() ||
         !gpuPadLayoutAttr.getCacheSets()) {
+      LLVM_DEBUG(llvm::dbgs() << "--no cache line bytes or sets\n");
       return noPaddingAttr;
     }
 
@@ -473,25 +481,39 @@ struct GPUPadLayoutResolverAttr final
     // Currently only support case where the
     // - innermost padding dimension is dynamic
     // - all other padding values are zero.
-    if (llvm::any_of(givenPadValues.drop_back(),
-                     [](int64_t val) { return val != 0; }) ||
-        givenPadValues.back() != ShapedType::kDynamic) {
+    // if (llvm::any_of(givenPadValues.drop_back(),
+    //                  [](int64_t val) { return val != 0; }) ||
+    //     givenPadValues.back() != ShapedType::kDynamic) {
+    //   LLVM_DEBUG(llvm::dbgs() << "TEST\n");
+    //   return nullptr;
+    // }
+    if (givenPadValues.back() != ShapedType::kDynamic) {
+      LLVM_DEBUG(llvm::dbgs() << "TEST\n");
       return nullptr;
     }
+    LLVM_DEBUG(llvm::dbgs() << "DYNAMIC\n");
 
     if (rank != givenPadValues.size()) {
+      LLVM_DEBUG(llvm::dbgs() << "--rank diff\n");
       return nullptr;
     }
     // TODO: Support dynamic shape of the inner tensor size.
     ArrayRef<int64_t> tensorShape = type.getShape();
     if (tensorShape.back() == ShapedType::kDynamic) {
-      return nullptr;
+      // if (givenPadValues.back() == ShapedType::kDynamic) {
+      //   return paddingEncodingAttr;
+      // }
+      LLVM_DEBUG(llvm::dbgs() << "--tensorshape dynamic\n");
+      // return nullptr;
+      return noPaddingAttr;
     }
 
     const int64_t elementBits = type.getElementTypeBitWidth();
     const int64_t cacheLineBytes = *gpuPadLayoutAttr.getCacheLineBytes();
     if (elementBits % 8 != 0 || elementBits > cacheLineBytes) {
       // We do not support unaligned element types.
+      LLVM_DEBUG(llvm::dbgs()
+                 << "--elementBits % 8 != 0 || elementBits > cacheLineBytes\n");
       return noPaddingAttr;
     }
 
@@ -502,27 +524,39 @@ struct GPUPadLayoutResolverAttr final
     const int64_t cacheSetSpanBytes =
         *gpuPadLayoutAttr.getCacheSets() * cacheLineBytes;
     const int64_t dimSizeInBytes = tensorShape.back() * (elementBits / 8);
+    LLVM_DEBUG(llvm::dbgs() << "--dimSizeInBytes: " << dimSizeInBytes << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "--cacheSetSpanBytes: " << cacheSetSpanBytes << "\n");
     if (dimSizeInBytes < cacheSetSpanBytes) {
+      LLVM_DEBUG(llvm::dbgs() << "--dimSizeInBytes < cacheSetSpanBytes: << "
+                              << (dimSizeInBytes < cacheSetSpanBytes) << "\n");
       // Very small dimension, leave as-is.
       return noPaddingAttr;
     }
 
+    // return noPaddingAttr;
+
     int64_t padBytes = 0;
     if (int64_t unalignedBytes = dimSizeInBytes % cacheLineBytes;
         unalignedBytes != 0) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "--unalignedBytes: " << unalignedBytes << "\n");
       // First, pad to the multiple of cache lines.
       padBytes += cacheLineBytes - unalignedBytes;
     }
+    LLVM_DEBUG(llvm::dbgs() << "--First padBytes: " << padBytes << "\n");
 
     if ((dimSizeInBytes + padBytes) % cacheSetSpanBytes == 0) {
       // Pad by one cache line to engage all cache sets.
       padBytes += cacheLineBytes;
     }
+    LLVM_DEBUG(llvm::dbgs() << "--Last padBytes: " << padBytes << "\n");
 
     assert((dimSizeInBytes + padBytes) % cacheLineBytes == 0 &&
            "Incorrect pad amount");
     assert(padBytes < cacheSetSpanBytes && "Incorrect pad amount");
     int64_t numPadElements = (padBytes * 8) / elementBits;
+    LLVM_DEBUG(llvm::dbgs() << "--numPadElements: " << numPadElements << "\n");
     SmallVector<int64_t> padValues(rank, 0);
     padValues.back() = numPadElements;
     auto padLayout = IREE::Encoding::PadEncodingLayoutAttr::get(ctx, padValues);

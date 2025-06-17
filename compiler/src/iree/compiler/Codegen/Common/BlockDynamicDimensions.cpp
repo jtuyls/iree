@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Transforms.h"
+#include "iree/compiler/Dialect/TensorExt/Transforms/Transforms.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -418,6 +419,7 @@ void BlockDynamicDimensionsPass::runOnOperation() {
                                                 context);
     memref::populateResolveRankedShapedTypeResultDimsPatterns(
         removeBarrierOpsPatterns);
+    // IREE::TensorExt::populateFuseCollapseIntoStorePattern(removeBarrierOpsPatterns);
     if (failed(applyPatternsGreedily(operation,
                                      std::move(removeBarrierOpsPatterns)))) {
       operation->emitOpError("failed in cleanup patterns");

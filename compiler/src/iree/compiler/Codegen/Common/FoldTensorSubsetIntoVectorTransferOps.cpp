@@ -15,6 +15,8 @@
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/PatternMatch.h"
 
+#define DEBUG_TYPE "iree-codegen-fold-tensor-subset-into-vector-transfer-ops"
+
 using namespace mlir;
 
 /// Returns true if all rank reduced in the given `extractOp` happen in leading
@@ -199,23 +201,34 @@ public:
 
   LogicalResult matchAndRewrite(tensor::InsertSliceOp insertOp,
                                 PatternRewriter &rewriter) const override {
-    if (!insertOp.hasUnitStride())
+    LLVM_DEBUG(llvm::dbgs() << "FoldInsertSliceIntoTransferWrite\n");
+    if (!insertOp.hasUnitStride()) {
+      LLVM_DEBUG(llvm::dbgs() << "!insertOp.hasUnitStride()\n");
       return failure();
+    }
 
     auto xferOp = insertOp.getSource().getDefiningOp<vector::TransferWriteOp>();
-    if (!xferOp)
+    if (!xferOp) {
+      LLVM_DEBUG(llvm::dbgs() << "!xferOp\n");
       return failure();
+    }
 
     // TODO: support 0-d corner case.
-    if (xferOp.getTransferRank() == 0)
+    if (xferOp.getTransferRank() == 0) {
+      LLVM_DEBUG(llvm::dbgs() << "transfer rank 0\n");
       return failure();
-    if (!xferOp.getPermutationMap().isIdentity())
+    }
+    if (!xferOp.getPermutationMap().isIdentity()) {
+      LLVM_DEBUG(llvm::dbgs() << "no identity\n");
       return failure();
+    }
     // Fold only if the TransferWriteOp completely overwrites the `source` with
     // a vector. I.e., the result of the TransferWriteOp is a new tensor whose
     // content is the data of the vector.
-    if (!isDestinationFullyOverwritten(xferOp))
+    if (!isDestinationFullyOverwritten(xferOp)) {
+      LLVM_DEBUG(llvm::dbgs() << "!isDestinationFullyOverwritten\n");
       return failure();
+    }
 
     // Bail on illegal rank-reduction: we need to check that the rank-reduced
     // dims are exactly the leading dims. I.e. the following is illegal:
@@ -243,8 +256,11 @@ public:
     auto actualSourceTensorShape = insertOp.getSourceType().getShape();
     if (rankReduced > 0 &&
         actualSourceTensorShape.take_back(vectorRank) !=
-            inferredSourceTensorType.getShape().take_back(vectorRank))
+            inferredSourceTensorType.getShape().take_back(vectorRank)) {
+      LLVM_DEBUG(llvm::dbgs() << "rankReduced\n");
       return failure();
+    }
+    LLVM_DEBUG(llvm::dbgs() << "CONVERT\n");
 
     SmallVector<Value> indices = getValueOrCreateConstantIndexOp(
         rewriter, insertOp.getLoc(), insertOp.getMixedOffsets());
@@ -342,11 +358,190 @@ public:
   }
 };
 
+/// Pattern to fold:
+/// %collapsed = tensor.collapse_shape (tensor.insert_slice %source into %empty
+/// ...) into: %new_insert_slice = tensor.insert_slice %source into %new_empty
+/// ...
+///
+/// This specific pattern targets cases where the dimensions collapsed by
+/// 'collapse_shape' are unit dimensions introduced or preserved by
+/// 'insert_slice', and the remaining dimensions align with the inserted value.
+struct FoldCollapseShapeOfInsertSlice final
+    : public OpRewritePattern<tensor::CollapseShapeOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::CollapseShapeOp collapseOp,
+                                PatternRewriter &rewriter) const override {
+    // 1. Check if the source of the `collapse_shape` is a
+    // `tensor.insert_slice`.
+    auto insertSliceOp = dyn_cast_or_null<tensor::InsertSliceOp>(
+        collapseOp.getSrc().getDefiningOp());
+    if (!insertSliceOp) {
+      return failure();
+    }
+
+    // 2. Check if the destination of the `insert_slice` is a `tensor.empty` op.
+    // This simplifies the analysis of the base tensor.
+    auto emptyOp = dyn_cast_or_null<tensor::EmptyOp>(
+        insertSliceOp.getDest().getDefiningOp());
+    if (!emptyOp) {
+      return failure();
+    }
+
+    // Get relevant types and values.
+    Value insertedValue = insertSliceOp.getSource(); // This is %71
+    RankedTensorType insertedValueType =
+        dyn_cast<RankedTensorType>(insertedValue.getType());
+    if (!insertedValueType) {
+      return failure(); // Only handle ranked tensors for the inserted value.
+    }
+
+    // Get the result type of the `collapse_shape` op (the desired final shape).
+    RankedTensorType resultType = collapseOp.getResultType();
+
+    // Get the reassociation map from the `collapse_shape` op.
+    SmallVector<ReassociationIndices, 4> reassociation =
+        collapseOp.getReassociationIndices();
+
+    // Get the slice parameters from the `insert_slice` op.
+    auto offsetsOFR = insertSliceOp.getMixedOffsets();
+    auto sizesOFR = insertSliceOp.getMixedSizes();
+    auto stridesOFR = insertSliceOp.getMixedStrides();
+
+    // Convert OpFoldResult to explicit int64_t for easier comparison.
+    // This pattern only handles constant slice parameters.
+    SmallVector<int64_t> constOffsets, constSizes, constStrides;
+    for (OpFoldResult ofr : offsetsOFR) {
+      if (auto val = getConstantIntValue(ofr))
+        constOffsets.push_back(*val);
+      else
+        return failure();
+    }
+    for (OpFoldResult ofr : sizesOFR) {
+      if (auto val = getConstantIntValue(ofr))
+        constSizes.push_back(*val);
+      else
+        return failure();
+    }
+    for (OpFoldResult ofr : stridesOFR) {
+      if (auto val = getConstantIntValue(ofr))
+        constStrides.push_back(*val);
+      else
+        return failure();
+    }
+
+    // For this example's reassociation [[0, 1, 2], [3]],
+    // the first group [0,1,2] maps to the first dimension of the result (index
+    // 0). The second group [3] maps to the second dimension of the result
+    // (index 1).
+
+    // `newSliceResultDim` tracks the dimension index in the *new*
+    // `insert_slice`'s result type.
+    int newSliceResultDim = 0;
+    // `currentOriginalInsertDim` tracks the dimension index in the original
+    // `insert_slice`'s *destination* type (and thus also its *result* type).
+    int currentOriginalInsertDim = 0;
+
+    SmallVector<OpFoldResult> newOffsets;
+    SmallVector<OpFoldResult> newSizes;
+    SmallVector<OpFoldResult> newStrides;
+
+    for (const auto &group : reassociation) {
+      if (group.empty())
+        return failure(); // Invalid reassociation group.
+
+      // If the group collapses multiple dimensions into one (e.g., [0,1,2] ->
+      // 0)
+      if (group.size() > 1) {
+        // For such a collapse to be foldable in this context, all dimensions
+        // in the group must have been unit dimensions (size 1) in the original
+        // `insert_slice` and their offsets 0 and strides 1.
+        // The new combined dimension will effectively be of size 1, offset 0,
+        // stride 1.
+        for (int64_t originalDimIdx : group) {
+          if (originalDimIdx != currentOriginalInsertDim ||
+              constOffsets[originalDimIdx] != 0 ||
+              constSizes[originalDimIdx] != 1 ||
+              constStrides[originalDimIdx] != 1) {
+            return failure(); // Mismatch: requires contiguous unit dims at
+                              // offset 0, size 1, stride 1.
+          }
+          currentOriginalInsertDim++;
+        }
+        newOffsets.push_back(rewriter.getIndexAttr(0));
+        newSizes.push_back(rewriter.getIndexAttr(1));
+        newStrides.push_back(rewriter.getIndexAttr(1));
+      } else { // If the group is a single dimension (e.g., [3] -> 1)
+        int64_t originalDimIdx = group[0];
+        if (originalDimIdx != currentOriginalInsertDim) {
+          return failure(); // Dimensions must be processed in order.
+        }
+
+        // This dimension should directly correspond to a dimension in the
+        // inserted value (%71). Its slice parameters are transferred directly.
+        // We need to check if the `insertedValueType` has enough dimensions.
+        if (currentOriginalInsertDim >= insertSliceOp.getDestType().getRank()) {
+          return failure(); // Mismatch in rank: access out of bounds for
+                            // original destination type.
+        }
+
+        newOffsets.push_back(offsetsOFR[originalDimIdx]);
+        newSizes.push_back(sizesOFR[originalDimIdx]);
+        newStrides.push_back(stridesOFR[originalDimIdx]);
+        currentOriginalInsertDim++;
+      }
+      newSliceResultDim++;
+    }
+
+    // Final check: ensure the number of dimensions in the new slice matches the
+    // rank of the `collapse_shape` result.
+    if (newSliceResultDim != resultType.getRank()) {
+      return failure();
+    }
+    // Also, ensure that all dimensions of the inserted value have been
+    // consumed.
+    if (currentOriginalInsertDim - (insertSliceOp.getDestType().getRank() -
+                                    insertedValueType.getRank()) !=
+        insertedValueType.getRank()) {
+      // This complex check ensures that we've matched the dimensions of the
+      // inserted value correctly. The 'dest rank - source rank' accounts for
+      // the unit dimensions possibly added by the insert_slice itself.
+      return failure();
+    }
+
+    // 3. Create a new `tensor.empty` op with the result type of the
+    // `collapse_shape`.
+    SmallVector<OpFoldResult> newEmptySizes;
+    for (int64_t dim : resultType.getShape()) {
+      if (dim == ShapedType::kDynamic) {
+        // For dynamic dimensions, this pattern is simplified.
+        // A more general pattern would need to map dynamic dimensions from
+        // `emptyOp` through the `reassociation` to determine the new dynamic
+        // dimension values.
+        return failure(); // Simplified: requires static dimensions for the new
+                          // empty.
+      }
+      newEmptySizes.push_back(rewriter.getIndexAttr(dim));
+    }
+    Value newEmpty = rewriter.create<tensor::EmptyOp>(
+        collapseOp.getLoc(), newEmptySizes, resultType.getElementType());
+    // Value newEmpty = rewriter.create<tensor::EmptyOp>(collapseOp.getLoc(),
+    // resultType);
+
+    // 4. Create the new `tensor.insert_slice` op.
+    rewriter.replaceOpWithNewOp<tensor::InsertSliceOp>(
+        collapseOp, insertedValue, newEmpty, newOffsets, newSizes, newStrides);
+
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::iree_compiler::populateVectorTransferTensorSliceTransforms(
     RewritePatternSet &patterns, PatternBenefit benefit) {
   patterns
-      .add<FoldExtractSliceIntoTransferRead, FoldInsertSliceIntoTransferWrite,
-           FoldExtractSliceIntoTransferWrite>(patterns.getContext(), benefit);
+      .add<FoldCollapseShapeOfInsertSlice, FoldExtractSliceIntoTransferRead,
+           FoldInsertSliceIntoTransferWrite, FoldExtractSliceIntoTransferWrite>(
+          patterns.getContext(), benefit);
 }

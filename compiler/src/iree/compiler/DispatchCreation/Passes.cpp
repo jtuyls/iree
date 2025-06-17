@@ -211,6 +211,8 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
   FunctionLikeNest(passManager)
       // Create dispatches for scalar operations as roots.
       .addPass(DispatchCreation::createFormScalarDispatchesPass)
+      // TODO
+      .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
       // Create `flow.dispatch.region` centered around a root and fuse with
       // producers and consumers.
       .addPass([&] {
@@ -230,6 +232,12 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
             CloneProducersIntoDispatchRegionsPassOptions{
                 options.enableAggressiveFusion});
       })
+      //   .addPass([&]() {
+      //     IREE::Flow::CanonicalizePassOptions options;
+      //     options.cseConstants = false;
+      //     return IREE::Flow::createCanonicalizePass(options);
+      //   })
+      //   .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
       // Collapse dimensions of linalg Ops.
       .addPass(DispatchCreation::createCollapseDimensionsPass);
 
@@ -251,6 +259,9 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
           return DispatchCreation::createSetEncodingPass(
               DispatchCreation::SetEncodingPassOptions{clSetEncodingStrategy});
         })
+        // The SetEncodingPass can insert expand/collapse shapes into dispatch
+        // regions.
+        .addPass(DispatchCreation::createBubbleUpExpandShapesPass)
         // SetEncodingOps should not be in the same dispatch as the data-tiled
         // op, so hoist them out of their current dispatch regions. Also, bubble
         // SetEncodingOps through special operations like bit-extending ops and

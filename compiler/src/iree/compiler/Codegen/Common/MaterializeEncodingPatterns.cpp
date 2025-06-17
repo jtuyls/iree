@@ -689,6 +689,7 @@ struct SetEncodingOpLoweringConversion
                   ConversionPatternRewriter &rewriter) const override {
     auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
         getTypeConverter());
+
     auto packedValue = lowerSetEncodingOpToPackOp(
         rewriter, encodingOp, adaptor.getSource(), *converter);
     if (failed(packedValue)) {
@@ -865,6 +866,7 @@ void populateMaterializeEncodingPatterns(
         // For types that are not `TensorExt::DispatchTensorType` mark as legal.
         if (!resultType)
           return true;
+
         return resultType == typeConverter.convertType(resultType);
       });
   target.addIllegalOp<IREE::Encoding::SetEncodingOp,

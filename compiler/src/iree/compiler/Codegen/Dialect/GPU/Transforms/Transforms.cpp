@@ -434,6 +434,7 @@ FailureOr<scf::ForallOp>
 fuseCollapseShapeIntoProducerForall(RewriterBase &rewriter,
                                     scf::ForallOp forallOp,
                                     tensor::CollapseShapeOp collapseOp) {
+  LLVM_DEBUG(llvm::dbgs() << "fuseCollapseShapeIntoProducerForall\n");
   // Check that there is a single user of the collapsed result.
   auto forallResult = cast<OpResult>(collapseOp.getSrc());
   if (!forallResult.hasOneUse()) {

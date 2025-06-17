@@ -22,6 +22,7 @@
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/HAL/Transforms/Passes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "iree/compiler/Dialect/TensorExt/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
 #include "llvm/ADT/STLForwardCompat.h"
@@ -907,6 +908,15 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
     funcPassManager.addPass(createCSEPass());
   }
 
+  funcPassManager.addPass(createGPUFuseAndHoistParallelLoopsPass());
+  // funcPassManager.addPass(createGPUGreedilyDistributeToThreadsPass());
+  // funcPassManager.addPass(createTileLargeTensorsPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  // funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  // funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
+  // funcPassManager.addPass(IREE::GPU::createCombineBarrierRegionsPass());
+
   funcPassManager.addPass(IREE::LinalgExt::createDecomposeAttentionPass());
   funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
@@ -939,6 +949,9 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
   // Linalg -> Vector
   addGPUVectorizationPasses(funcPassManager, /*vectorizeCopies=*/true,
                             /*enableMasking=*/true);
+
+  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+  funcPassManager.addPass(createCleanupBufferAllocViewPass());
 
   // Allocate tensors for copies to shared memory.
   funcPassManager.addPass(createGPUVectorAllocPass());
@@ -1247,6 +1260,7 @@ static void buildLLVMGPUCodegenConfigurationPassPipelineImpl(
     // This materializes into 'nop' in the absence of pad encoding layout
     // attributes.
     funcPassManager.addPass(createBlockDynamicDimensionsPass);
+    // funcPassManager.addPass(IREE::TensorExt::createFuseCollapseIntoStorePass);
     funcPassManager.addPass(createConfigTrackingCanonicalizerPass);
     funcPassManager.addPass(createCSEPass);
   }
@@ -1268,6 +1282,7 @@ void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
   // Hoisting them now deduplicates them and ensures that rewrite patterns don't
   // need to think about explicitly copying them over to new ops.
   variantPassManager.addPass(IREE::HAL::createHoistExecutableObjectsPass());
+  // funcPassManager.addPass(());
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());

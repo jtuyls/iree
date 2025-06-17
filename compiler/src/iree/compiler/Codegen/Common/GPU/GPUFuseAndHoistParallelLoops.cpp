@@ -333,6 +333,7 @@ struct FuseCollapseShapeConsumers final
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(tensor::CollapseShapeOp collapseOp,
                                 PatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs() << "FuseCollapseShapeConsumers\n");
     auto forallOp = collapseOp.getSrc().getDefiningOp<scf::ForallOp>();
     if (!forallOp) {
       return rewriter.notifyMatchFailure(collapseOp, "No forall op producer");
