@@ -195,42 +195,28 @@ util.func @no_pad_skinny_matmuls(%lhs : tensor<?x?xf32>, %rhs0 : tensor<?x2048xf
 
 // -----
 
-// Check threshold of 64 for setting the padding
+// Check that a matmul with attention producer isn't padded.
 
-util.func @check_padding_threshold(%lhs : tensor<?x?xf32>, %rhs0 : tensor<?x2048xf32>,
-    %rhs1 : tensor<2048x8xf32>, %K : index) -> tensor<8x8xf32> {
-  %c0 = arith.constant 0.0 : f32
-  %0 = flow.dispatch.region[%K] -> (tensor<8x2048xf32>) {
-    %1 = tensor.empty() : tensor<8x2048xf32>
-    %2 = linalg.fill ins(%c0 : f32) outs(%1 : tensor<8x2048xf32>) -> tensor<8x2048xf32>
-    %3 = linalg.matmul ins(%lhs, %rhs0 : tensor<?x?xf32>, tensor<?x2048xf32>)
-        outs(%2 : tensor<8x2048xf32>) -> tensor<8x2048xf32>
-    flow.return %3 : tensor<8x2048xf32>
-  } count(%w0: index) -> (index, index, index) {
-    %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice %w0
-    flow.return %x, %y, %z : index, index, index
+util.func public @no_attention_producer(%arg0: tensor<4x8x4x?x32x2x64xf32>, %arg1: tensor<4x?x32x8x2x64xf32>, %arg2: tensor<4x?x32x8x128xf32>, %arg3: tensor<?x32x?x32xf32>, %arg4: tensor<4096x8xf32>, %arg5: f32, %arg6: index) -> tensor<?x8xf32> {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c128 = arith.constant 128 : index
+  %0 = flow.dispatch.region -> (tensor<4x8x4x?x32x128xf32>{%arg6}) {
+    %3 = tensor.empty(%arg6) : tensor<4x8x4x?x32x128xf32>
+    %4 = iree_linalg_ext.attention {indexing_maps = [affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> (d0, d1, d2, d3, d4, d6, d7)>, affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> (d0, d8, d9, d1, d6, d7)>, affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> (d0, d8, d9, d1, d5)>, affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> ()>, affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> (d3, d4, d8, d9)>, affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9) -> (d0, d1, d2, d3, d4, d5)>]} ins(%arg0, %arg1, %arg2, %arg5, %arg3 : tensor<4x8x4x?x32x2x64xf32>, tensor<4x?x32x8x2x64xf32>, tensor<4x?x32x8x128xf32>, f32, tensor<?x32x?x32xf32>) outs(%3 : tensor<4x8x4x?x32x128xf32>) {
+    ^bb0(%arg7: f32):
+      iree_linalg_ext.yield %arg7 : f32
+    } -> tensor<4x8x4x?x32x128xf32>
+    flow.return %4 : tensor<4x8x4x?x32x128xf32>
   }
-  %1 = flow.dispatch.region -> (tensor<8x8xf32>) {
-    %2 = tensor.empty() : tensor<8x8xf32>
-    %3 = linalg.fill ins(%c0 : f32) outs(%2 : tensor<8x8xf32>) -> tensor<8x8xf32>
-    %4 = linalg.matmul ins(%0, %rhs1 : tensor<8x2048xf32>, tensor<2048x8xf32>)
-        outs(%3 : tensor<8x8xf32>) -> tensor<8x8xf32>
-    flow.return %4 : tensor<8x8xf32>
-  } count() -> (index, index, index) {
-    %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice
-    flow.return %x, %y, %z : index, index, index
+  %1 = arith.muli %arg6, %c128 : index
+  %collapsed = tensor.collapse_shape %0 [[0, 1, 2, 3], [4, 5]] : tensor<4x8x4x?x32x128xf32> into tensor<?x4096xf32>
+  %2 = flow.dispatch.region -> (tensor<?x8xf32>{%1}) {
+    %3 = tensor.empty(%1) : tensor<?x8xf32>
+    %4 = linalg.fill ins(%cst : f32) outs(%3 : tensor<?x8xf32>) -> tensor<?x8xf32>
+    %5 = linalg.matmul ins(%collapsed, %arg4 : tensor<?x4096xf32>, tensor<4096x8xf32>) outs(%4 : tensor<?x8xf32>) -> tensor<?x8xf32>
+    flow.return %5 : tensor<?x8xf32>
   }
-  util.return %1 : tensor<8x8xf32>
+  util.return %2 : tensor<?x8xf32>
 }
-// CHECK-LABEL: @check_padding_threshold(
-//       CHECK:   %[[DISPATCH0:.+]] = flow.dispatch.region
-//  CHECK-SAME:       -> (tensor<8x2048xf32, #iree_encoding.pad_encoding_layout<[0, ?]>>)
-//       CHECK:     %[[OP0:.+]] = linalg.matmul
-//       CHECK:     %[[SET_ENCODING:.+]] = iree_encoding.set_encoding %[[OP0]]
-//       CHECK:     flow.return %[[SET_ENCODING]]
-//       CHECK:   %[[DISPATCH1:.+]] = flow.dispatch.region
-//       CHECK:     %[[UNSET_ENCODING:.+]] = iree_encoding.unset_encoding %[[DISPATCH0]]
-//  CHECK-SAME:         tensor<8x2048xf32>
-//       CHECK:     linalg.matmul
-//  CHECK-SAME:         ins(%[[UNSET_ENCODING]],
-//       CHECK:   return %[[DISPATCH1]]
+// CHECK-LABEL: @no_attention_producer(
+//   CHECK-NOT: #iree_encoding.pad_encoding_layout

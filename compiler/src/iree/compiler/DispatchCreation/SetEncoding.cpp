@@ -311,28 +311,17 @@ struct FoldFillWithSetEncoding final
 // Set padding encodings
 //===---------------------------------------------------------------------===//
 
-struct PaddedValue {
-  Value paddedValue;
-  SmallVector<Value> dynamicDims;
-};
-
-// For a given `operand`, if its producer is a `flow.dispatch.region`,
-// generate a new value for `operand` that has the padding encoding.
-// The producer `flow.dispatch.region` need not be the immediate defining op
-// of `operand`. This method tracks through operations like
-// `tensor.expand_shape/tensor.collapse_shape` to get to the producer dispatch.
-// Once the producer dispatch is found, its result is modified to be of the same
-// type as `operand` but with the padding encodings. To keep things consistent,
-// the operations that are encountered before getting to the original producing
-// `flow.dispatch.region` are replicated into the producer dispatch.
-static std::optional<PaddedValue> padProducerOfValue(RewriterBase &rewriter,
-                                                     Value operand) {
+// Utility to return the producer dispatch region op and op result. 'opChain' is
+// an output parameter and allows returning the chain of operations being looked
+// past during the traversal to find the producer dispatch.
+static std::optional<std::pair<IREE::Flow::DispatchRegionOp, OpResult>>
+getProducerDispatchAndValue(Value operand,
+                            SmallVectorImpl<Operation *> &opChain) {
   auto operandType = dyn_cast<RankedTensorType>(operand.getType());
   if (!operandType || operandType.getRank() == 0) {
     return std::nullopt;
   }
 
-  SmallVector<Operation *> opChain;
   auto producerValue = dyn_cast<OpResult>(operand);
   while (producerValue &&
          !isa<IREE::Flow::DispatchRegionOp>(producerValue.getOwner())) {
@@ -371,6 +360,45 @@ static std::optional<PaddedValue> padProducerOfValue(RewriterBase &rewriter,
   if (!llvm::hasSingleElement(producerValue.getUses())) {
     return std::nullopt;
   }
+  return std::make_pair(producerDispatch, producerValue);
+}
+
+// Utility to return the producer dispatch region op and op result, but without
+// the need to provide an operation chain argument.
+static std::optional<std::pair<IREE::Flow::DispatchRegionOp, OpResult>>
+getProducerDispatchAndValue(Value operand) {
+  SmallVector<Operation *> opChain;
+  return getProducerDispatchAndValue(operand, opChain);
+}
+
+struct PaddedValue {
+  Value paddedValue;
+  SmallVector<Value> dynamicDims;
+};
+
+// For a given `operand`, if its producer is a `flow.dispatch.region`,
+// generate a new value for `operand` that has the padding encoding.
+// The producer `flow.dispatch.region` need not be the immediate defining op
+// of `operand`. This method tracks through operations like
+// `tensor.expand_shape/tensor.collapse_shape` to get to the producer dispatch.
+// Once the producer dispatch is found, its result is modified to be of the same
+// type as `operand` but with the padding encodings. To keep things consistent,
+// the operations that are encountered before getting to the original producing
+// `flow.dispatch.region` are replicated into the producer dispatch.
+static std::optional<PaddedValue> padProducerOfValue(RewriterBase &rewriter,
+                                                     Value operand) {
+  auto operandType = dyn_cast<RankedTensorType>(operand.getType());
+  SmallVector<Operation *> opChain;
+  std::optional<std::pair<IREE::Flow::DispatchRegionOp, OpResult>>
+      maybeProducerDispatchAndValue =
+          getProducerDispatchAndValue(operand, opChain);
+  if (!maybeProducerDispatchAndValue) {
+    return std::nullopt;
+  }
+  IREE::Flow::DispatchRegionOp producerDispatch;
+  OpResult producerValue;
+  std::tie(producerDispatch, producerValue) =
+      maybeProducerDispatchAndValue.value();
 
   Location loc = producerDispatch.getLoc();
   unsigned resultNumber = producerValue.getResultNumber();
@@ -477,76 +505,11 @@ static SmallVector<unsigned> padOperandsOfOp(RewriterBase &rewriter,
   return paddedOperands;
 }
 
-static std::optional<IREE::Flow::DispatchRegionOp>
-getProducerDispatchRegionOp(Value operand) {
-  auto operandType = dyn_cast<RankedTensorType>(operand.getType());
-  if (!operandType || operandType.getRank() == 0) {
-    return std::nullopt;
-  }
-
-  SmallVector<Operation *> opChain;
-  auto producerValue = dyn_cast<OpResult>(operand);
-  while (producerValue &&
-         !isa<IREE::Flow::DispatchRegionOp>(producerValue.getOwner())) {
-    if (!llvm::hasSingleElement(producerValue.getUses())) {
-      return std::nullopt;
-    }
-
-    // If it is an operation that we want to look past, add it to the chain
-    // and update the `producerValue`.
-    Operation *currOperation = producerValue.getOwner();
-    if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp>(currOperation)) {
-      opChain.push_back(currOperation);
-      producerValue = dyn_cast<OpResult>(currOperation->getOperand(0));
-      continue;
-    }
-
-    // Conservative, bail out.
-    return std::nullopt;
-  }
-
-  if (!producerValue) {
-    return std::nullopt;
-  }
-
-  auto producerDispatch =
-      dyn_cast<IREE::Flow::DispatchRegionOp>(producerValue.getOwner());
-  // TODO(MaheshRavishankar): Multi-result producer dispatches can be supported.
-  // Will require to move the consumer dispatch immediately after the producer
-  // instead of what is done below and move other operands of the consumer
-  // dispatch before the producer dispatch.
-  if (!producerDispatch ||
-      !llvm::hasSingleElement(producerDispatch.getBody()) ||
-      producerDispatch->getNumResults() != 1) {
-    return std::nullopt;
-  }
-  if (!llvm::hasSingleElement(producerValue.getUses())) {
-    return std::nullopt;
-  }
-  return producerDispatch;
-}
-
 // Return a list of operands to be padded for each `op`.
 SmallVector<unsigned> getOperandsToPad(Operation *op) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp || !linalg::isaContractionOpInterface(linalgOp)) {
     return {};
-  }
-
-  SmallVector<int64_t> operandsNum = {0, 1};
-  for (int64_t operandNum : operandsNum) {
-    OpOperand &operand = op->getOpOperand(operandNum);
-    std::optional<IREE::Flow::DispatchRegionOp> regionOp =
-        getProducerDispatchRegionOp(operand.get());
-    bool containsAttention = false;
-    if (regionOp.has_value()) {
-      regionOp->walk(
-          [&](IREE::LinalgExt::AttentionOp op) { containsAttention = true; });
-    }
-    if (containsAttention) {
-      llvm::outs() << "containsAttention!!\n";
-      return {};
-    }
   }
 
   // Bail out on matvec / vecmat and skinny matmul problems.
@@ -586,6 +549,22 @@ SmallVector<unsigned> getOperandsToPad(Operation *op) {
       parallelDimSize < kSkinnyMatmulThreshold) {
     // This matmul is skinny, do not pad.
     return {};
+  }
+
+  SmallVector<int64_t> operandsNum = {0, 1};
+  for (int64_t operandNum : operandsNum) {
+    OpOperand &operand = op->getOpOperand(operandNum);
+    std::optional<std::pair<IREE::Flow::DispatchRegionOp, OpResult>>
+        dispatchAndValue = getProducerDispatchAndValue(operand.get());
+    if (dispatchAndValue.has_value()) {
+      WalkResult res =
+          dispatchAndValue->first->walk([&](IREE::LinalgExt::AttentionOp op) {
+            return WalkResult::interrupt();
+          });
+      if (res.wasInterrupted()) {
+        return {};
+      }
+    }
   }
 
   return {0, 1};
