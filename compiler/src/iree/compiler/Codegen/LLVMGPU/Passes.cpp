@@ -908,11 +908,11 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
     funcPassManager.addPass(createCSEPass());
   }
 
-  funcPassManager.addPass(createGPUFuseAndHoistParallelLoopsPass());
+  // funcPassManager.addPass(createGPUFuseAndHoistParallelLoopsPass());
   // funcPassManager.addPass(createGPUGreedilyDistributeToThreadsPass());
   // funcPassManager.addPass(createTileLargeTensorsPass());
-  funcPassManager.addPass(createCanonicalizerPass());
-  funcPassManager.addPass(createCSEPass());
+  // funcPassManager.addPass(createCanonicalizerPass());
+  // funcPassManager.addPass(createCSEPass());
   // funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
   // funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
   // funcPassManager.addPass(IREE::GPU::createCombineBarrierRegionsPass());
@@ -950,8 +950,8 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
   addGPUVectorizationPasses(funcPassManager, /*vectorizeCopies=*/true,
                             /*enableMasking=*/true);
 
-  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
-  funcPassManager.addPass(createCleanupBufferAllocViewPass());
+  // funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+  // funcPassManager.addPass(createCleanupBufferAllocViewPass());
 
   // Allocate tensors for copies to shared memory.
   funcPassManager.addPass(createGPUVectorAllocPass());
