@@ -31,3 +31,19 @@ util.func public @propagate_encoding_through_collapse_shape_chain(%src: tensor<2
 // CHECK:         %[[SET_ENCODING:.+]] = iree_encoding.set_encoding %[[COLLAPSED_0]] : tensor<2x4096x640xf16> -> tensor<2x4096x640xf16, #[[$ENCODING1]]>
 // CHECK:         %[[COLLAPSED_1:.+]] = tensor.collapse_shape %[[SET_ENCODING]] {{\[}}[0, 1], [2]] : tensor<2x4096x640xf16, #[[$ENCODING1]]> into tensor<8192x640xf16, #[[$ENCODING0]]>
 // CHECK:         util.return %[[COLLAPSED_1]]
+
+// -----
+
+#encoding = #iree_encoding.encoding<operand_index = 2 : index, op_type =  matmul, element_types = [f8E4M3FNUZ, f8E4M3FNUZ, f32], user_indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>]>
+util.func public @propagate_unset_encoding_through_generic(%arg0 : tensor<?x4096xf32, #encoding>, %arg1 : tensor<f32>, %arg2 : index) -> tensor<?x4096xbf16> {
+  %0 = iree_encoding.unset_encoding %arg0 : tensor<?x4096xf32, #encoding> -> tensor<?x4096xf32>{%arg2}
+  %1 = tensor.empty(%arg2) : tensor<?x4096xbf16>
+  %2 = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> ()>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = ["parallel", "parallel"]} ins(%0, %arg1 : tensor<?x4096xf32>, tensor<f32>) outs(%1 : tensor<?x4096xbf16>) {
+    ^bb0(%in: f32, %in_1: f32, %out: bf16):
+      %1803 = arith.mulf %in, %in_1 : f32
+      %1804 = arith.truncf %1803 : f32 to bf16
+      linalg.yield %1804 : bf16
+    } -> tensor<?x4096xbf16>
+  util.return %2 : tensor<?x4096xbf16>
+}
+// CHECK-LABEL: @propagate_unset_encoding_through_generic2

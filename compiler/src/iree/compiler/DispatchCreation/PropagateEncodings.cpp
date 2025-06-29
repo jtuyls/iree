@@ -34,6 +34,14 @@ struct SwapEncodingOpWithTensorCollapseShapeOp
                                 PatternRewriter &rewriter) const override;
 };
 
+struct SwapUnsetEncodingWithOp
+    : public OpRewritePattern<IREE::Encoding::UnsetEncodingOp> {
+  using Base = OpRewritePattern<IREE::Encoding::UnsetEncodingOp>;
+  using Base::Base;
+  LogicalResult matchAndRewrite(IREE::Encoding::UnsetEncodingOp encodingOp,
+                                PatternRewriter &rewriter) const override;
+};
+
 // TODO(#20179): Support the propagation through interfaces. It is supposed to
 // be done with data-flow analysis.
 struct PropagateEncodingsPass
@@ -95,11 +103,96 @@ LogicalResult SwapEncodingOpWithTensorCollapseShapeOp::matchAndRewrite(
   return success();
 }
 
+LogicalResult SwapUnsetEncodingWithOp::matchAndRewrite(
+  IREE::Encoding::UnsetEncodingOp encodingOp, PatternRewriter &rewriter) const {
+  LLVM_DEBUG(llvm::dbgs() << "SwapUnsetEncodingWithOp\n");
+  LLVM_DEBUG(llvm::dbgs() << "Parent: " << *encodingOp->getParentOp() << "\n");
+  rewriter.setInsertionPointAfter(encodingOp);
+  if (!encodingOp->hasOneUse()) {
+    LLVM_DEBUG(llvm::dbgs() << "Encoding op has multiple uses\n");
+    return rewriter.notifyMatchFailure(encodingOp, "has multiple uses");
+  }
+  Operation *targetOp = *encodingOp->getUsers().begin();
+  LLVM_DEBUG(llvm::dbgs() << "targetOp: " << *targetOp << "\n");
+  if (!targetOp) {
+    return rewriter.notifyMatchFailure(encodingOp, "no operation following the encodingOp");
+  }
+  if (targetOp->getNumResults() != 1) {
+    return rewriter.notifyMatchFailure(encodingOp, "should be followed by an operation with a single result");
+  }
+  Value target = targetOp->getResult(0);
+
+  
+  LLVM_DEBUG(llvm::dbgs() << "encodingOp.getSourceType(): " << encodingOp.getSourceType() << "\n");
+  
+  auto propagationAttrInterface =
+      dyn_cast<IREE::Encoding::EncodingPropagationAttrInterface>(
+          encodingOp.getSourceType().getEncoding());
+  if (!propagationAttrInterface ||
+      !propagationAttrInterface.isPropagable(target)) {
+    LLVM_DEBUG(llvm::dbgs() << "Not propagable\n");
+    return rewriter.notifyMatchFailure(
+        encodingOp, "the propagation attribute interface isn't defined or the "
+                    "target isn't propagable");
+  }
+  // Get the encoding attributes for the operands and results of the operation.
+  FailureOr<IREE::Encoding::PropagationEncoding> propagationEncodings =
+      propagationAttrInterface.generateEncodings(target);
+  if (failed(propagationEncodings)) {
+    LLVM_DEBUG(llvm::dbgs() << "No prop attrs and results\n");
+    return rewriter.notifyMatchFailure(encodingOp,
+                                      "not able to determine propagation "
+                                      "attributes for operands and results");
+  }
+  // Operation * =
+  //     encodingOp.getSource().getDefiningOp<tensor::CollapseShapeOp>();
+  // if (!collapseOp) {
+  //   return rewriter.notifyMatchFailure(encodingOp,
+  //                                     "expected a collapse_shape producer");
+  // }
+  // if (!IREE::Flow::isNonNullAndOutsideDispatch(encodingOp) ||
+  //     !IREE::Flow::isNonNullAndOutsideDispatch(targetOp)) {
+  //   return rewriter.notifyMatchFailure(
+  //       encodingOp, "expected that both operations are outside dispatch");
+  // }
+  auto propagationResult =
+      dyn_cast<IREE::Encoding::EncodingPropagationOpInterface>(
+          targetOp);
+  if (!propagationResult) {
+    LLVM_DEBUG(llvm::dbgs() << "encoding propagation op interface isn't defined\n");
+    return rewriter.notifyMatchFailure(
+        encodingOp, "encoding propagation op interface isn't defined");
+  }
+  // Propagate the set encoding and generate the new encoding operations.
+  FailureOr<IREE::Encoding::PropagationResult> maybeResult =
+      propagationResult.propagateEncoding(
+          rewriter, *propagationEncodings,
+          cast<OpResult>(encodingOp.getResult()));
+          // cast<OpResult>(encodingOp->getUses().begin()->get()));
+  if (failed(maybeResult)) {
+    LLVM_DEBUG(llvm::dbgs() << "not able to propagate encodings and find replacement\n");
+    return rewriter.notifyMatchFailure(
+        encodingOp, "not able to propagate encodings and find replacement");
+  }
+  // rewriter.replaceOp(targetOp, maybeResult->replacement);
+  // rewriter.
+  auto resultType = cast<RankedTensorType>(maybeResult->replacement.getType()).dropEncoding();
+  LLVM_DEBUG(llvm::dbgs() << "maybeResult->replacement: " << maybeResult->replacement << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "resultType: " << resultType << "\n");
+  auto newUnsetEncoding = rewriter.create<IREE::Encoding::UnsetEncodingOp>(
+    encodingOp.getLoc(), resultType, maybeResult->replacement, encodingOp.getResultDims());
+  rewriter.replaceOp(targetOp, newUnsetEncoding);
+  // targetOp->dropAllUses();
+  // rewriter.eraseOp(targetOp);
+  return success();
+}
+
 void PropagateEncodingsPass::runOnOperation() {
   mlir::FunctionOpInterface funcOp = getOperation();
   MLIRContext *ctx = &getContext();
   RewritePatternSet propagationPatterns(ctx);
   propagationPatterns.insert<SwapEncodingOpWithTensorCollapseShapeOp>(ctx);
+  propagationPatterns.insert<SwapUnsetEncodingWithOp>(ctx);
   GreedyRewriteConfig config;
   config.enableFolding(true).enableConstantCSE(false);
   if (failed(applyPatternsGreedily(funcOp, std::move(propagationPatterns),
