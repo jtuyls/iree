@@ -262,3 +262,52 @@ util.func public @no_attention_producer(%arg0: tensor<4x8x4x?x32x2x64xf32>, %arg
 }
 // CHECK-LABEL: @no_attention_producer(
 //   CHECK-NOT: #iree_encoding.pad_encoding_layout
+
+// -----
+
+util.func public @bubble_up_expand_after_set_encoding(%arg0: tensor<?xbf16>, %arg1: tensor<1024x4096xf8E4M3FNUZ>, %arg2: index) -> tensor<?x1024xf32> {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c4096 = arith.constant 4096 : index
+  %0 = flow.dispatch.region -> (tensor<?xf8E4M3FNUZ>{%arg2}) {
+    %3 = tensor.empty(%arg2) : tensor<?xf8E4M3FNUZ>
+    %4 = linalg.generic {indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>], iterator_types = ["parallel"]} ins(%arg0 : tensor<?xbf16>) outs(%3 : tensor<?xf8E4M3FNUZ>) {
+    ^bb0(%in: bf16, %out: f8E4M3FNUZ):
+      %5 = arith.truncf %in : bf16 to f8E4M3FNUZ
+      linalg.yield %5 : f8E4M3FNUZ
+    } -> tensor<?xf8E4M3FNUZ>
+    flow.return %4 : tensor<?xf8E4M3FNUZ>
+  }
+  %1 = arith.divsi %arg2, %c4096 : index
+  %expanded = tensor.expand_shape %0 [[0, 1]] output_shape [%1, 4096] : tensor<?xf8E4M3FNUZ> into tensor<?x4096xf8E4M3FNUZ>
+  %2 = flow.dispatch.region -> (tensor<?x1024xf32>{%1}) {
+    %3 = tensor.empty(%1) : tensor<?x1024xf32>
+    %4 = linalg.fill ins(%cst : f32) outs(%3 : tensor<?x1024xf32>) -> tensor<?x1024xf32>
+    %5 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = ["parallel", "parallel", "reduction"]} ins(%expanded, %arg1 : tensor<?x4096xf8E4M3FNUZ>, tensor<1024x4096xf8E4M3FNUZ>) outs(%4 : tensor<?x1024xf32>) {
+    ^bb0(%in: f8E4M3FNUZ, %in_0: f8E4M3FNUZ, %out: f32):
+      %6 = arith.extf %in : f8E4M3FNUZ to f32
+      %7 = arith.extf %in_0 : f8E4M3FNUZ to f32
+      %8 = arith.mulf %6, %7 : f32
+      %9 = arith.addf %out, %8 : f32
+      linalg.yield %9 : f32
+    } -> tensor<?x1024xf32>
+    flow.return %5 : tensor<?x1024xf32>
+  }
+  util.return %2 : tensor<?x1024xf32>
+}
+// CHECK-LABEL: @bubble_up_expand_after_set_encoding(
+//  CHECK-SAME:   %[[ARG0:.+]]: tensor<?xbf16>, %[[ARG1:.+]]: tensor<1024x4096xf8E4M3FNUZ>, %[[ARG2:.+]]: index
+//       CHECK:   %[[DIV:.+]] = arith.divsi %arg2, %c4096 : index
+//       CHECK:   %[[DISPATCH0:.+]] = flow.dispatch.region
+//  CHECK-SAME:       -> (tensor<?x4096xf8E4M3FNUZ, #iree_encoding.padding<[0, ?]>>{%[[DIV]]}) {
+//       CHECK:     %[[EXPANDED:.+]] = tensor.expand_shape %[[ARG0]]
+//       CHECK:     %[[GENERIC:.+]] = linalg.generic
+//  CHECK-SAME:       ins(%[[EXPANDED]]
+//       CHECK:     %[[SET_ENCODING:.+]] = iree_encoding.set_encoding %[[GENERIC]]
+//       CHECK:     flow.return %[[SET_ENCODING]]
+//       CHECK:   }
+//       CHECK:   %[[DISPATCH1:.+]] = flow.dispatch.region
+//  CHECK-SAME:       -> (tensor<?x1024xf32>{%[[DIV]]}) {
+//       CHECK:     %[[UNSET_ENCODING:.+]] = iree_encoding.unset_encoding %[[DISPATCH0]]
+//       CHECK:     %[[GENERIC:.+]] = linalg.generic
+//  CHECK-SAME:       ins(%[[UNSET_ENCODING]]
+//       CHECK:   }

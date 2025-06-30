@@ -16,8 +16,10 @@
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree/compiler/Dialect/LinalgExt/Transforms/Transforms.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -37,6 +39,20 @@ using IREE::Encoding::MatmulKAttr;
 //===---------------------------------------------------------------------===//
 // Utility functions
 //===---------------------------------------------------------------------===//
+
+static bool
+isExpandingUnitDims(ArrayRef<ReassociationIndices> reassociationIndices,
+                    ArrayRef<int64_t> expandedShape) {
+  for (ReassociationIndicesRef reassoc : reassociationIndices) {
+    if (reassoc.size() > 1 &&
+        llvm::any_of(reassoc, [&expandedShape](int64_t dim) {
+          return expandedShape[dim] == 1;
+        })) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static Value setEncoding(OpBuilder &builder, Location loc, Value source,
                          Attribute encodingAttr) {
@@ -619,6 +635,43 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
     // Implement the padding encoding.
     if (encodingOption == DispatchCreation::EncodingOptions::Padding) {
       if (failed(setPaddingEncodings(context, funcOp))) {
+        return signalPassFailure();
+      }
+
+      // The introducing the encodings can insert expand/collapse shapes into
+      // dispatch regions, so it's useful to bubble them up/down.
+      RewritePatternSet patterns(context);
+      linalg::ControlFusionFn bubbleUpExpansionControlFn =
+          [](OpOperand *opOperand) {
+            Operation *producer = opOperand->get().getDefiningOp();
+            Operation *consumer = opOperand->getOwner();
+            if (!producer || !consumer) {
+              return false;
+            }
+
+            // Don't reintroduce unit dims via propagating edge unit dim
+            // reshapes.
+            if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(consumer);
+                expandOp &&
+                isExpandingUnitDims(expandOp.getReassociationIndices(),
+                                    expandOp.getResultType().getShape())) {
+              return false;
+            }
+            if (auto collapseOp = dyn_cast<tensor::CollapseShapeOp>(producer);
+                collapseOp &&
+                isExpandingUnitDims(collapseOp.getReassociationIndices(),
+                                    collapseOp.getSrcType().getShape())) {
+              return false;
+            }
+            // Bubble in all other cases.
+            return true;
+          };
+      linalg::populateFoldReshapeOpsByExpansionPatterns(
+          patterns, bubbleUpExpansionControlFn);
+      IREE::LinalgExt::populateFoldReshapeOpsByExpansionPatterns(
+          patterns, bubbleUpExpansionControlFn);
+      memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
         return signalPassFailure();
       }
       return;
