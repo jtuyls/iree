@@ -638,42 +638,42 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
         return signalPassFailure();
       }
 
-      // The introducing the encodings can insert expand/collapse shapes into
-      // dispatch regions, so it's useful to bubble them up/down.
-      RewritePatternSet patterns(context);
-      linalg::ControlFusionFn bubbleUpExpansionControlFn =
-          [](OpOperand *opOperand) {
-            Operation *producer = opOperand->get().getDefiningOp();
-            Operation *consumer = opOperand->getOwner();
-            if (!producer || !consumer) {
-              return false;
-            }
+      // // The introducing the encodings can insert expand/collapse shapes into
+      // // dispatch regions, so it's useful to bubble them up/down.
+      // RewritePatternSet patterns(context);
+      // linalg::ControlFusionFn bubbleUpExpansionControlFn =
+      //     [](OpOperand *opOperand) {
+      //       Operation *producer = opOperand->get().getDefiningOp();
+      //       Operation *consumer = opOperand->getOwner();
+      //       if (!producer || !consumer) {
+      //         return false;
+      //       }
 
-            // Don't reintroduce unit dims via propagating edge unit dim
-            // reshapes.
-            if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(consumer);
-                expandOp &&
-                isExpandingUnitDims(expandOp.getReassociationIndices(),
-                                    expandOp.getResultType().getShape())) {
-              return false;
-            }
-            if (auto collapseOp = dyn_cast<tensor::CollapseShapeOp>(producer);
-                collapseOp &&
-                isExpandingUnitDims(collapseOp.getReassociationIndices(),
-                                    collapseOp.getSrcType().getShape())) {
-              return false;
-            }
-            // Bubble in all other cases.
-            return true;
-          };
-      linalg::populateFoldReshapeOpsByExpansionPatterns(
-          patterns, bubbleUpExpansionControlFn);
-      IREE::LinalgExt::populateFoldReshapeOpsByExpansionPatterns(
-          patterns, bubbleUpExpansionControlFn);
-      memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
-      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
-        return signalPassFailure();
-      }
+      //       // Don't reintroduce unit dims via propagating edge unit dim
+      //       // reshapes.
+      //       if (auto expandOp = dyn_cast<tensor::ExpandShapeOp>(consumer);
+      //           expandOp &&
+      //           isExpandingUnitDims(expandOp.getReassociationIndices(),
+      //                               expandOp.getResultType().getShape())) {
+      //         return false;
+      //       }
+      //       if (auto collapseOp = dyn_cast<tensor::CollapseShapeOp>(producer);
+      //           collapseOp &&
+      //           isExpandingUnitDims(collapseOp.getReassociationIndices(),
+      //                               collapseOp.getSrcType().getShape())) {
+      //         return false;
+      //       }
+      //       // Bubble in all other cases.
+      //       return true;
+      //     };
+      // linalg::populateFoldReshapeOpsByExpansionPatterns(
+      //     patterns, bubbleUpExpansionControlFn);
+      // IREE::LinalgExt::populateFoldReshapeOpsByExpansionPatterns(
+      //     patterns, bubbleUpExpansionControlFn);
+      // memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
+      // if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+      //   return signalPassFailure();
+      // }
       return;
     }
 
