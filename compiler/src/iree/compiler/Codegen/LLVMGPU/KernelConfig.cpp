@@ -606,6 +606,9 @@ checkDispatchForVectorDistribution(Operation *parentOp) {
       storeOps.push_back(op);
     }
   });
+  entryPoint.walk([&](IREE::Codegen::StoreToBufferOp op) {
+    storeOps.push_back(op.getOperation());
+  });
 
   if (storeOps.empty()) {
     return failure();
@@ -744,12 +747,17 @@ static LogicalResult
 setReductionVectorDistributionConfig(IREE::GPU::TargetAttr target,
                                      mlir::FunctionOpInterface entryPoint,
                                      linalg::LinalgOp op) {
+  LLVM_DEBUG(llvm::dbgs() << "setReductionVectorDistributionConfig\n");
   MLIRContext *context = op.getContext();
   OpBuilder b(context);
+
+  LLVM_DEBUG(llvm::dbgs() << "op: " << op << "\n");
 
   if (!hasReductionIterator(op)) {
     return failure();
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "TEST0\n");
 
   FailureOr<SetVector<linalg::LinalgOp>> computeOps =
       checkDispatchForVectorDistribution<IREE::TensorExt::DispatchTensorStoreOp,
@@ -759,6 +767,8 @@ setReductionVectorDistributionConfig(IREE::GPU::TargetAttr target,
   if (failed(computeOps)) {
     return failure();
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "TEST1\n");
 
   SmallVector<unsigned> parallelDims;
   SmallVector<unsigned> reductionDims;
@@ -787,13 +797,19 @@ setReductionVectorDistributionConfig(IREE::GPU::TargetAttr target,
     }
   }
 
+  LLVM_DEBUG(llvm::dbgs() << "TEST2\n");
+
   if (subgroupSize == 0)
     return failure();
+
+    LLVM_DEBUG(llvm::dbgs() << "TEST3\n");
 
   auto bitWidth = getBitWidth(op);
   if (failed(bitWidth)) {
     return failure();
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "MID\n");
 
   // Reduction distribution only supports 8/16/32 bit types now.
   if (!llvm::is_contained({8, 16, 32}, *bitWidth)) {
