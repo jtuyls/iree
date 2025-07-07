@@ -606,9 +606,6 @@ checkDispatchForVectorDistribution(Operation *parentOp) {
       storeOps.push_back(op);
     }
   });
-  entryPoint.walk([&](IREE::Codegen::StoreToBufferOp op) {
-    storeOps.push_back(op.getOperation());
-  });
 
   if (storeOps.empty()) {
     return failure();
