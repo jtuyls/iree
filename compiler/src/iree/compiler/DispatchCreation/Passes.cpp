@@ -268,6 +268,10 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
     passManager.addPass(DispatchCreation::createHoistEncodingOpsPass());
     FunctionLikeNest(passManager)
         .addPass(DispatchCreation::createPropagateEncodingsPass)
+        .addPass([&]() {
+            return DispatchCreation::createHoistEncodingOpsPass(
+                HoistEncodingOpsPassOptions{clHoistEncodingsForConstExpr});
+          })
         .addPass(
             DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass);
   }

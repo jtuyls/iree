@@ -176,19 +176,25 @@ struct GenericOpPropagationInterface
             auto encodingAttr = cast<IREE::Encoding::EncodingAttr>(encoding);
             // Append the operand's indexing map to the encoding's user indexing maps.
             AffineMap operandMap = genericOp.getMatchingIndexingMap(operand);
+            auto operandType = cast<RankedTensorType>(operand->get().getType());
 
             // SmallVector<Value> resultDims;
             Operation *sourceOp = operand->get().getDefiningOp();
-            if (sourceOp && sourceOp == encodingOp) {
-              encodedOperands.push_back(encodingOp.getSource());
-              continue;
+            if (sourceOp) {
+              if (operandType.getRank() == 0 || operandType.getRank() == 1) {
+                encodedOperands.push_back(operand->get());
+                continue;
+              }
+              if (sourceOp == encodingOp) {
+                encodedOperands.push_back(encodingOp.getSource());
+                continue;
+              }
             }
             // LLVM_DEBUG(llvm::dbgs() << "operand: " << *operand->get().getDefiningOp() << "\n");
 
             // Create new encoding and set encoding on the operand.
             IREE::Encoding::EncodingAttr newEncoding =
-              encodingAttr.cloneWithNewOperandIndexingMap(operandMap);
-            auto operandType = cast<RankedTensorType>(operand->get().getType());
+              encodingAttr.cloneWithNewOperandIndexingMap(operandMap); 
             auto resType = RankedTensorType::get(
                 operandType.getShape(), operandType.getElementType(), newEncoding);
             Value encodedInput = rewriter.create<IREE::Encoding::SetEncodingOp>(

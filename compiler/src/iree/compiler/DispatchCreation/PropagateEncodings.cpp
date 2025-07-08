@@ -191,7 +191,7 @@ void PropagateEncodingsPass::runOnOperation() {
   mlir::FunctionOpInterface funcOp = getOperation();
   MLIRContext *ctx = &getContext();
   RewritePatternSet propagationPatterns(ctx);
-  propagationPatterns.insert<SwapEncodingOpWithTensorCollapseShapeOp>(ctx);
+  // propagationPatterns.insert<SwapEncodingOpWithTensorCollapseShapeOp>(ctx);
   propagationPatterns.insert<SwapUnsetEncodingWithOp>(ctx);
   GreedyRewriteConfig config;
   config.enableFolding(true).enableConstantCSE(false);
