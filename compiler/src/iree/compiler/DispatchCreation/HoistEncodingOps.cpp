@@ -227,6 +227,10 @@ void HoistEncodingOpsPass::runOnOperation() {
     if (!setEncodingOp->getParentOfType<IREE::Flow::DispatchRegionOp>()) {
       return;
     }
+    auto ty = cast<RankedTensorType>(setEncodingOp.getSource().getType());
+    if (ty.getRank() == 0 || ty.getRank() == 1) {
+      return;
+    }
     // Avoid hoisting set encodings that are using the padding encodings.
     Attribute encoding = setEncodingOp.getResultType().getEncoding();
     if (isa_and_nonnull<IREE::Encoding::PaddingAttr>(encoding)) {

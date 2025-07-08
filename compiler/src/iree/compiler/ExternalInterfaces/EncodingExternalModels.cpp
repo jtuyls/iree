@@ -181,10 +181,10 @@ struct GenericOpPropagationInterface
             // SmallVector<Value> resultDims;
             Operation *sourceOp = operand->get().getDefiningOp();
             if (sourceOp) {
-              if (operandType.getRank() == 0 || operandType.getRank() == 1) {
-                encodedOperands.push_back(operand->get());
-                continue;
-              }
+              // if (operandType.getRank() == 0 || operandType.getRank() == 1) {
+              //   encodedOperands.push_back(operand->get());
+              //   continue;
+              // }
               if (sourceOp == encodingOp) {
                 encodedOperands.push_back(encodingOp.getSource());
                 continue;
@@ -193,8 +193,11 @@ struct GenericOpPropagationInterface
             // LLVM_DEBUG(llvm::dbgs() << "operand: " << *operand->get().getDefiningOp() << "\n");
 
             // Create new encoding and set encoding on the operand.
+            // Attribute newEncoding =
+            //   operandType.getRank() == 0 || operandType.getRank() == 1 ? cast<Attribute>(IREE::Encoding::IdentityAttr::get(op->getContext())) 
+            //   : cast<Attribute>(encodingAttr.cloneWithNewOperandIndexingMap(operandMap)); 
             IREE::Encoding::EncodingAttr newEncoding =
-              encodingAttr.cloneWithNewOperandIndexingMap(operandMap); 
+              encodingAttr.cloneWithNewOperandIndexingMap(operandMap);
             auto resType = RankedTensorType::get(
                 operandType.getShape(), operandType.getElementType(), newEncoding);
             Value encodedInput = rewriter.create<IREE::Encoding::SetEncodingOp>(
