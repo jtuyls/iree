@@ -51,7 +51,7 @@ getIterationDomainAsWorkload(TilingInterface specializationRoot) {
   LLVM_DEBUG(llvm::dbgs() << "specializationRoot: " << specializationRoot << "\n");
 
   SmallVector<AssumedWorkloadSize> workloadAssumptions(iterationSpace.size());
-  SmallVector<Operation *> toBeErased;
+  // SmallVector<Operation *> toBeErased;
   // return SmallVector<AssumedWorkloadSize>{};
   LLVM_DEBUG(llvm::dbgs() << "iterationSpace: " << iterationSpace.size() << "\n");
   for (auto [i, range] : llvm::enumerate(iterationSpace)) {
@@ -71,12 +71,12 @@ getIterationDomainAsWorkload(TilingInterface specializationRoot) {
     }
 
     auto size = cast<Value>(range.size);
-    Operation * sizeOp = size.getDefiningOp();
-    if (sizeOp && size.use_empty()) {
-      LLVM_DEBUG(llvm::dbgs() << "Clean up: " << *sizeOp << "\n");
-      // Clean up `tensor.dim` operations as they are not used.
-      toBeErased.push_back(sizeOp);
-    }
+    // Operation * sizeOp = size.getDefiningOp();
+    // if (sizeOp && size.use_empty()) {
+    //   LLVM_DEBUG(llvm::dbgs() << "Clean up: " << *sizeOp << "\n");
+    //   // Clean up `tensor.dim` operations as they are not used.
+    //   // toBeErased.push_back(sizeOp);
+    // }
 
     // Look for the ordinal defining the size. This relies on folders kicking in
     // to remove the cruft when querying for the iteration domain.
@@ -120,9 +120,9 @@ getIterationDomainAsWorkload(TilingInterface specializationRoot) {
     }
   }
 
-  for (Operation *op : toBeErased) {
-    op->erase();
-  }
+  // for (Operation *op : toBeErased) {
+  //   op->erase();
+  // }
   return workloadAssumptions;
 }
 
