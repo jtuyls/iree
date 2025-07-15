@@ -2199,6 +2199,17 @@ transform.named_sequence @match_emmt_f8_f8_f32_impl(%root: !transform.any_op {tr
   transform.yield %root : !transform.any_op
 }
 
+transform.named_sequence @match_emmt_f8_f8_f32_impl_2(%root: !transform.any_op {transform.readonly}) -> !transform.any_op {
+  transform.match.operation_name %root ["linalg.generic"] : !transform.any_op
+  %ins, %outs = transform.iree.match.cast_compatible_dag_from_root %root {
+    ^bb0(%lhs: tensor<?x64x8x4x4x4x2x8xf8E4M3FNUZ>, %rhs: tensor<112x64x4x2x4x16x2x8xf8E4M3FNUZ>, %empty: tensor<?x112x4x8x2x4x16x4xf32>):
+    %cst = arith.constant 0.0 : f32
+    %out = linalg.fill ins(%cst : f32) outs(%empty : tensor<?x112x4x8x2x4x16x4xf32>) -> tensor<?x112x4x8x2x4x16x4xf32>
+    %7 = iree_codegen.inner_tiled ins(%lhs, %rhs) outs(%out) {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>, #linalg.iterator_type<reduction>], kind = #iree_gpu.data_tiled_mma_layout<intrinsic = MFMA_F32_16x16x32_F8E4M3FNUZ, intrinsics_m = 8, intrinsics_n = 2, subgroups_n = 4, intrinsics_k = 2>, lowering_config = #iree_gpu.lowering_config<{promote_operands = [0, 1], reduction = [0, 0, 1], workgroup = [1, 1, 0]}>} : tensor<?x64x8x4x4x4x2x8xf8E4M3FNUZ>, tensor<112x64x4x2x4x16x2x8xf8E4M3FNUZ> into tensor<?x112x4x8x2x4x16x4xf32>
+  } : (!transform.any_op) -> (!transform.any_value, !transform.any_value)
+  transform.yield %root : !transform.any_op
+}
+
 transform.named_sequence
 @match_mmt_f8_f8_f32_large_expanded(%matmul: !transform.any_op {transform.readonly})
   -> (!transform.any_op, !transform.any_param) {
@@ -2246,9 +2257,78 @@ transform.named_sequence
   transform.yield %matmul, %config : !transform.any_op, !transform.any_param
 }
 
+transform.named_sequence
+@match_mmt_f8_f8_f32_large_expanded_2(%matmul: !transform.any_op {transform.readonly})
+  -> (!transform.any_op, !transform.any_param) {
+  %mmt = transform.include @match_emmt_f8_f8_f32_impl_2 failures(propagate) (%matmul)
+    : (!transform.any_op) -> !transform.any_op
+  %lhs = transform.get_operand %matmul[0] : (!transform.any_op) -> !transform.any_value
+  %rhs = transform.get_operand %matmul[1] : (!transform.any_op) -> !transform.any_value
+
+  // M % 256 == 0, K % 128 == 0, N % 256 == 0
+  transform.iree.match.dim_is_multiple_of  %lhs[1], 256 : !transform.any_value
+  transform.iree.match.dim_is_multiple_of  %lhs[2], 128 : !transform.any_value
+  transform.iree.match.dim_is_multiple_of  %rhs[0], 256 : !transform.any_value
+  transform.iree.match.dim_is_multiple_of  %rhs[1], 128 : !transform.any_value
+
+  // M, N >= 1024, K >= 512
+
+  // TODO: Kernel specialization is needed to apply this strategy selectively at
+  // runtime. Additionally model exports don't specify lower bounds so it is
+  // impossible to use this strategy with this check.
+  // transform.iree.match.dim_bounds %lhs[0], umin = 4, none : !transform.any_value
+
+  transform.iree.match.dim_bounds %rhs[0], umin = 1024, none : !transform.any_value
+  transform.iree.match.dim_bounds %lhs[2], umin = 512, none : !transform.any_value
+
+  // Lowering config for pingpong large. "cast_and_call_pingpong_matmul" refers
+  // to the custom lowering strategy to use, which in this case replaces the
+  // matmul with a call to the @pingpong_large implementation above.
+  %config = transform.param.constant #iree_codegen.compilation_info<
+    lowering_config = #iree_gpu.lowering_config<{
+      workgroup = [1, 256, 256, 0],
+      lowering_strategy = "cast_and_call_expanded_f8_pingpong_matmul"}>,
+    translation_info = #iree_codegen.translation_info<pipeline = LLVMGPUTileAndFuse
+      workgroup_size = [512, 1, 1] subgroup_size = 64,
+      // This strategy uses the maximum amount of possible shared memory on
+      // all gfx942 architectures so shared memory padding to reduce bank
+      // conflicts must be disabled. Also prefetching is done manually in the
+      // above and is disabled here as well.
+      {gpu_pipeline_options =
+        #iree_gpu.pipeline_options<
+          prefetch_shared_memory = false,
+          no_reduce_shared_memory_bank_conflicts = true>,
+      // This strategy requires 2 waves per SIMD.
+        llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
+  > -> !transform.any_param
+  transform.yield %matmul, %config : !transform.any_op, !transform.any_param
+}
+
 /// Applies the op config for pingpong_large. This requires importing external
 /// symbols needed for the custom lowering (in this case inline + replace).
 transform.named_sequence @apply_expanded_f8_pingpong_op_config(%op: !transform.any_op {transform.readonly},
+                                        %config: !transform.any_param {transform.readonly}) {
+  transform.annotate %op "compilation_info" = %config : !transform.any_op, !transform.any_param
+  transform.annotate %op "__tuning_spec_applied__" : !transform.any_op
+  %module = transform.util.get_nearest_symbol_table %op : (!transform.any_op) -> !transform.any_op
+
+  // Create and serialize a module with the needed symbols.
+  %syms = transform.util.create_serialized_module {
+    ^bb0(%m: !transform.any_op):
+      transform.util.import_symbol @cast_and_call_expanded_f8_pingpong_matmul into %m if undefined : (!transform.any_op) -> !transform.any_op
+      transform.util.import_symbol @pingpong_large_f8_expanded into %m if undefined : (!transform.any_op) -> !transform.any_op
+      transform.annotate %m "transform.with_named_sequence" : !transform.any_op
+  } -> !transform.any_param
+
+  // Annotate the parent function with the serialized module.
+  %func = transform.get_parent_op %op {isolated_from_above} : (!transform.any_op) -> !transform.any_op
+  transform.annotate %func "iree_codegen_external_symbols" = %syms : !transform.any_op, !transform.any_param
+  transform.yield
+}
+
+/// Applies the op config for pingpong_large. This requires importing external
+/// symbols needed for the custom lowering (in this case inline + replace).
+transform.named_sequence @apply_expanded_f8_pingpong_op_config_2(%op: !transform.any_op {transform.readonly},
                                         %config: !transform.any_param {transform.readonly}) {
   transform.annotate %op "compilation_info" = %config : !transform.any_op, !transform.any_param
   transform.annotate %op "__tuning_spec_applied__" : !transform.any_op
@@ -2741,6 +2821,7 @@ transform.named_sequence
     // Match pingpong variants.
     @match_mmt_f16_f16_f32_large_expanded -> @apply_expanded_pingpong_op_config,
     @match_mmt_f8_f8_f32_large_expanded -> @apply_expanded_f8_pingpong_op_config,
+    @match_mmt_f8_f8_f32_large_expanded_2 -> @apply_expanded_f8_pingpong_op_config_2,
     @match_mmt_f16_f16_f32_large -> @apply_pingpong_op_config,
     @match_mmt_bf16_bf16_f32_large_expanded -> @apply_expanded_bf16_pingpong_op_config,
     @match_mmt_bf16_bf16_f32_large -> @apply_bf16_pingpong_op_config,
