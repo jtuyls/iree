@@ -227,8 +227,8 @@ void HoistEncodingOpsPass::runOnOperation() {
     if (!setEncodingOp->getParentOfType<IREE::Flow::DispatchRegionOp>()) {
       return;
     }
-    auto ty = cast<RankedTensorType>(setEncodingOp.getSource().getType());
-    if (ty.getRank() == 0 || ty.getRank() == 1) {
+    auto inputType = cast<RankedTensorType>(setEncodingOp.getSource().getType());
+    if (inputType.getRank() == 0) {
       return;
     }
     // Avoid hoisting set encodings that are using the padding encodings.
