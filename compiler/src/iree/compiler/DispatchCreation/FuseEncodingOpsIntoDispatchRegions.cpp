@@ -119,6 +119,7 @@ struct FuseEncodingOpsIntoDispatchRegionsPass
             moveFollowingOpIntoDispatchRegion(rewriter, consumer,
                                               producerDispatch);
         if (failed(fusedDispatch)) {
+          LLVM_DEBUG(llvm::dbgs() << "--failed: " << *consumer << "\n");
           return signalPassFailure();
         }
         producerDispatch = fusedDispatch.value();

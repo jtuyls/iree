@@ -515,19 +515,51 @@ movePrecedingOpsIntoDispatchRegion(RewriterBase &rewriter,
   return newRegionOp.value();
 }
 
+LogicalResult moveOperationDependenciesIntoRegion(RewriterBase &rewriter,
+    Operation *op, IREE::Flow::DispatchRegionOp regionOp) {
+  mlir::DominanceInfo dominance(regionOp);
+
+  // Find the backward slice of operation for each `Value` the operation
+  // depends on. Prune the slice to only include operations not already
+  // dominated by the `insertionPoint`
+  BackwardSliceOptions options;
+  options.inclusive = false;
+  options.omitUsesFromAbove = false;
+  // Since current support is to only move within a same basic block,
+  // the slices dont need to look past block arguments.
+  options.omitBlockArguments = true;
+  options.filter = [&](Operation *sliceBoundaryOp) {
+    return sliceBoundaryOp != regionOp.getOperation() &&
+      !dominance.properlyDominates(sliceBoundaryOp, regionOp);
+  };
+  llvm::SetVector<Operation *> slice;
+  LogicalResult result = getBackwardSlice(op, &slice, options);
+  assert(result.succeeded() && "expected a backward slice");
+  (void)result;
+
+  LLVM_DEBUG(llvm::dbgs() << "slice: " << slice.size() << "\n");
+  for (Operation * e : slice) {
+    LLVM_DEBUG(llvm::dbgs() << "e: " << e << "\n");
+  }
+
+  // We should move the slice in topological order, but `getBackwardSlice`
+  // already does that. So no need to sort again.
+  for (Operation *op : slice) {
+    rewriter.moveOpBefore(op, regionOp);
+  }
+  return success();
+}
+
 // Move a `target` op that is following the given dispatch region op into the
 // dispatch region.
 FailureOr<IREE::Flow::DispatchRegionOp>
 moveFollowingOpIntoDispatchRegion(RewriterBase &rewriter, Operation *target,
                                   IREE::Flow::DispatchRegionOp regionOp) {
-  // Fail if any of the `target` operands do not dominate the dispatch region.
-  mlir::DominanceInfo dominanceInfo(regionOp);
-  for (Value operand : target->getOperands()) {
-    Operation *definingOp = operand.getDefiningOp();
-    if (definingOp && !dominanceInfo.dominates(definingOp, regionOp)) {
-      return rewriter.notifyMatchFailure(
-          target, "target operands do not dominate the dispatch region op.");
-    }
+  if (failed(moveOperationDependenciesIntoRegion(rewriter, target, regionOp))) {
+    // If dependencies couldn't be moved (e.g., they are immutable, or too complex),
+    // then this specific 'target' cannot be moved here.
+    LLVM_DEBUG(llvm::dbgs() << "Could not move dependencies for upward motion.\n");
+    return rewriter.notifyMatchFailure(target, "Could not move dependencies for upward motion.");
   }
 
   // Values replaced by moving the `target` into the dispatch region.
@@ -543,6 +575,7 @@ moveFollowingOpIntoDispatchRegion(RewriterBase &rewriter, Operation *target,
   Block &body = regionOp.getBody().front();
   // Clone op into dispatch region.
   OpBuilder::InsertionGuard g(rewriter);
+  // Operation *insertion
   rewriter.setInsertionPoint(body.getTerminator());
   Operation *clonedTarget = rewriter.clone(*target);
 

@@ -93,6 +93,9 @@ movePrecedingOpsIntoDispatchRegion(RewriterBase &rewriter,
                                    ArrayRef<Operation *> targets,
                                    Flow::DispatchRegionOp regionOp);
 
+bool canMoveFollowingOpIntoDispatchRegion(Operation *target,
+                                    IREE::Flow::DispatchRegionOp regionOp);
+
 /// Move a `target` op that is following the given dispatch region op into the
 /// dispatch region.
 ///
@@ -101,6 +104,8 @@ movePrecedingOpsIntoDispatchRegion(RewriterBase &rewriter,
 /// yielded result. Operands of the `target` that are produced by the dispatch
 /// region are replaced in the cloned op with the corresponding result yielded
 /// inside of the dispatch region.
+///
+/// The move will fail if `canMoveFollowingOpIntoDispatchRegion` returns false.
 ///
 /// Example:
 ///
