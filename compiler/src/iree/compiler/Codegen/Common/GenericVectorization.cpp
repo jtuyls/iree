@@ -11,6 +11,7 @@
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/Support/DebugLog.h"
+#include "llvm/Support/InterleavedRange.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/Transforms/Hoisting.h"
@@ -61,6 +62,7 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
   SmallVector<bool> scalableFlags;
   TypeSwitch<Operation *, void>(op)
       .Case<linalg::LinalgOp>([&](linalg::LinalgOp linalgOp) {
+        LLVM_DEBUG(llvm::dbgs() << "Infer from linalg\n");
         std::optional<VectorizationTileSizes> result =
             inferSizesFromIR(linalgOp, /*opResult=*/std::nullopt);
         if (result) {
@@ -69,12 +71,14 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
         }
       })
       .Case<linalg::PackOp, linalg::UnPackOp>([&](auto op) {
+        LLVM_DEBUG(llvm::dbgs() << "Infer from pack\n");
         std::optional<VectorizationTileSizes> result = inferSizesFromIR(op);
         if (result) {
           vectorSizes = result->vectorSizes;
         }
       })
       .Case<tensor::PadOp>([&](tensor::PadOp padOp) {
+        LLVM_DEBUG(llvm::dbgs() << "Infer from pad\n");
         auto ty = padOp.getResultType();
         // TODO(hanchung): Infer the vector sizes for pad op after
         // maskedVectorize method allows dynamic result shapes.
@@ -83,6 +87,7 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
         vectorSizes = SmallVector<int64_t>(ty.getShape());
       })
       .Case<IREE::LinalgExt::GatherOp>([&](IREE::LinalgExt::GatherOp gatherOp) {
+        LLVM_DEBUG(llvm::dbgs() << "Infer from gather\n");
         std::optional<VectorizationTileSizes> result =
             inferSizesFromIR(gatherOp.getOutput());
         if (result) {
@@ -155,11 +160,19 @@ void GenericVectorizationPass::runOnOperation() {
   for (Operation *op : candidates) {
     SmallVector<int64_t> vectorSizes;
     SmallVector<bool> scalableVecDims;
+    LLVM_DEBUG(llvm::dbgs()
+               << "enableVectorMasking: " << enableVectorMasking << "\n");
     if (enableVectorMasking) {
       std::optional<SizesAndScalableFlags> vectorSizesAndScalableDims =
           getVectorSizes(op, useConfiguredVectorSizes);
       if (vectorSizesAndScalableDims) {
         std::tie(vectorSizes, scalableVecDims) = *vectorSizesAndScalableDims;
+        LLVM_DEBUG(llvm::dbgs()
+                   << "vectorSizes: " << llvm::interleaved_array(vectorSizes)
+                   << "\n");
+        LLVM_DEBUG(llvm::dbgs()
+                   << "scalableVecDims: "
+                   << llvm::interleaved_array(scalableVecDims) << "\n");
       }
     }
 
@@ -194,6 +207,12 @@ void GenericVectorizationPass::runOnOperation() {
       }
     }
   };
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "After init:\n";
+    funcOp->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n";
+  });
 
   {
     // Eliminate (all-true) vector masks as early as possible (to avoid missing

@@ -1309,6 +1309,7 @@ static void buildLLVMGPUCodegenConfigurationPassPipelineImpl(
 void buildLLVMGPUCodegenConfigurationPassPipeline(
     OpPassManager &variantPassManager) {
   variantPassManager.addPass(createSpecializeExportsPass());
+  variantPassManager.addPass(createCSEPass());
   buildLLVMGPUCodegenConfigurationPassPipelineImpl(
       variantPassManager.nest<ModuleOp>());
 }

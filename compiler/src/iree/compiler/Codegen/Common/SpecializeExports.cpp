@@ -44,13 +44,22 @@ struct AssumedWorkloadSize {
 /// new one.
 static FailureOr<SmallVector<AssumedWorkloadSize>>
 getIterationDomainAsWorkload(TilingInterface specializationRoot) {
+  // return SmallVector<AssumedWorkloadSize>{};
   OpBuilder b(specializationRoot);
   SmallVector<mlir::Range> iterationSpace =
       specializationRoot.getIterationDomain(b);
+  LLVM_DEBUG(llvm::dbgs() << "specializationRoot: " << specializationRoot
+                          << "\n");
 
   SmallVector<AssumedWorkloadSize> workloadAssumptions(iterationSpace.size());
-
+  SmallVector<Operation *> toBeErased;
+  // return SmallVector<AssumedWorkloadSize>{};
+  LLVM_DEBUG(llvm::dbgs() << "iterationSpace: " << iterationSpace.size()
+                          << "\n");
   for (auto [i, range] : llvm::enumerate(iterationSpace)) {
+
+    LLVM_DEBUG(llvm::dbgs() << "range: " << range << "\n");
+
     // Non-zero offset and non-unit stride unsupported.
     if (!isZeroInteger(range.offset) || !isOneInteger(range.stride)) {
       LLVM_DEBUG(llvm::dbgs() << "Failed to get zero offset + unit stride.");
@@ -63,9 +72,16 @@ getIterationDomainAsWorkload(TilingInterface specializationRoot) {
       continue;
     }
 
+    auto size = cast<Value>(range.size);
+    Operation *sizeOp = size.getDefiningOp();
+    if (sizeOp && size.use_empty()) {
+      LLVM_DEBUG(llvm::dbgs() << "Clean up: " << *sizeOp << "\n");
+      // Clean up `tensor.dim` operations as they are not used.
+      toBeErased.push_back(sizeOp);
+    }
+
     // Look for the ordinal defining the size. This relies on folders kicking in
     // to remove the cruft when querying for the iteration domain.
-    auto size = cast<Value>(range.size);
     if (auto dimOp = size.getDefiningOp<tensor::DimOp>()) {
       std::optional<int64_t> dim = getConstantIntValue(dimOp.getDimension());
       if (dim) {
@@ -104,6 +120,10 @@ getIterationDomainAsWorkload(TilingInterface specializationRoot) {
       workloadAssumptions[i].assumptionOrOrdinal =
           cast<OpResult>(workloadOrdinal.getOperand());
     }
+  }
+
+  for (Operation *op : toBeErased) {
+    op->erase();
   }
   return workloadAssumptions;
 }
@@ -148,6 +168,8 @@ static void specializeExportedFunction(
     LLVM_DEBUG(llvm::dbgs() << "Empty specialization ranges.");
     return;
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "func0: \n" << func << "\n");
 
   SymbolTable innerModule = SymbolTable::getNearestSymbolTable(func);
   SymbolTable symbolTable(innerModule);
