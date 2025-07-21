@@ -333,11 +333,14 @@ struct GPUEncodingPackedLayoutMaterializerAttr
     if (!gpuAttr) {
       return info;
     }
+    LLVM_DEBUG(llvm::dbgs() << "Encoding: " << encoding << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "gpuAttr: " << gpuAttr << "\n");
     DataTiledMMAAttr mma = chooseDataTiledMMAAttr(
         encoding.getElementTypesArray(), gpuAttr, encoding);
     if (!mma) {
       return info;
     }
+    LLVM_DEBUG(llvm::dbgs() << "MMA: " << mma << "\n");
 
     // Map the matmul TileMxNxK to an actual tile shape for the tensor at hand,
     // based on its operand index in the matmul.
