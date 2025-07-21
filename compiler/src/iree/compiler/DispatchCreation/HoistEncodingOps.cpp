@@ -216,7 +216,6 @@ struct SinkUnsetEncodingOp
       return rewriter.notifyMatchFailure(
           encodingOp, "expected that both operations are inside dispatch");
     }
-
     auto propagationAttrInterface =
         dyn_cast<IREE::Encoding::EncodingPropagationAttrInterface>(
             encodingOp.getSourceType().getEncoding());
