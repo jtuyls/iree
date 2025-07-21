@@ -815,12 +815,17 @@ setReductionVectorDistributionConfig(IREE::GPU::TargetAttr target,
     LDBG() << "Reduction Vector Distribution not enabled, skipping...";
     return failure();
   }
+  LLVM_DEBUG(llvm::dbgs() << "setReductionVectorDistributionConfig\n");
   MLIRContext *context = op.getContext();
   OpBuilder b(context);
+
+  LLVM_DEBUG(llvm::dbgs() << "op: " << op << "\n");
 
   if (!hasReductionIterator(op)) {
     return failure();
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "TEST0\n");
 
   FailureOr<SetVector<linalg::LinalgOp>> computeOps =
       checkDispatchForVectorDistribution<IREE::TensorExt::DispatchTensorStoreOp,
@@ -830,6 +835,8 @@ setReductionVectorDistributionConfig(IREE::GPU::TargetAttr target,
   if (failed(computeOps)) {
     return failure();
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "TEST1\n");
 
   SmallVector<unsigned> parallelDims;
   SmallVector<unsigned> reductionDims;
@@ -859,10 +866,13 @@ setReductionVectorDistributionConfig(IREE::GPU::TargetAttr target,
     }
   }
 
+  LLVM_DEBUG(llvm::dbgs() << "TEST2\n");
+
   if (subgroupSize == 0)
     return failure();
 
   FailureOr<int64_t> bitWidth = getBitWidth(op);
+  LLVM_DEBUG(llvm::dbgs() << "TEST3\n");
   if (failed(bitWidth)) {
     return failure();
   }

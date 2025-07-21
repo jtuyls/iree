@@ -277,14 +277,14 @@ addDispatchRegionCreationPasses(OpPassManager &passManager,
         .addPass([&]() {
           return DispatchCreation::createSetEncodingPass(
               DispatchCreation::SetEncodingPassOptions{clSetEncodingStrategy});
-        });
+        })
+        .addPass(DispatchCreation::createPropagateEncodingsPass);
     // SetEncodingOps should not be in the same dispatch as the data-tiled
     // op, so hoist them out of their current dispatch regions. Also, bubble
     // SetEncodingOps through special operations like bit-extending ops and
     // broadcasting ops.
     passManager.addPass(DispatchCreation::createHoistEncodingOpsPass());
     FunctionLikeNest(passManager)
-        .addPass(DispatchCreation::createPropagateEncodingsPass)
         .addPass(
             DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass);
   }
