@@ -52,6 +52,8 @@ constexpr StringLiteral kSerializedTuningSpecAttrName =
     "iree_codegen.tuning_spec_mlirbc";
 constexpr StringLiteral kKernelConfigSpecName = "__kernel_config";
 static constexpr StringLiteral kUKernelDescriptorName = "iree_codegen.ukernel";
+static constexpr StringLiteral kUKernelProviderName =
+    "iree_codegen.ukernel_provider";
 
 //===----------------------------------------------------------------------===//
 // Helpers for getting/setting iree_codegen.translation_info attribute on a

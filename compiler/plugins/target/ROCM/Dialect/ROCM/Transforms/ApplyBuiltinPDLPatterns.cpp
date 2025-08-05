@@ -76,7 +76,6 @@ static LogicalResult matchContraction(PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(rootOp,
                                        "not a contraction like linalg op");
   }
-
   if (linalgOp.getIndexingMaps() != indexingMaps) {
     return rewriter.notifyMatchFailure(rootOp, "indexing maps mismatch");
   }
