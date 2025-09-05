@@ -379,32 +379,42 @@ public:
         });
       }
     }
-    if (options.enableTensorUKernels) {
-      if (auto attr = getGPUTargetAttr(targetAttr.getContext(), targetAttr)) {
-        ROCM::ApplyBuiltinPDLPatternsPassOptions options;
-        options.enableTensorUKernels = true;
-        if (IREE::GPU::TargetChipAttr chip = attr.getChip()) {
-          if (StringAttr sku = chip.getSku()) {
-            options.targets.push_back(sku.str());
-          }
-        }
-        options.targets.push_back(attr.getArch().str());
-        OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
-        FunctionLikeNest(modulePassManager).addPass([&]() {
-          return ROCM::createApplyBuiltinPDLPatternsPass(options);
-        });
+    // if (options.enableTensorUKernels) {
+    //   if (auto attr = getGPUTargetAttr(targetAttr.getContext(), targetAttr)) {
+    //     ROCM::ApplyBuiltinPDLPatternsPassOptions options;
+    //     options.enableTensorUKernels = true;
+    //     if (IREE::GPU::TargetChipAttr chip = attr.getChip()) {
+    //       if (StringAttr sku = chip.getSku()) {
+    //         options.targets.push_back(sku.str());
+    //       }
+    //     }
+    //     options.targets.push_back(attr.getArch().str());
+    //     OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
+    //     FunctionLikeNest(modulePassManager).addPass([&]() {
+    //       return ROCM::createApplyBuiltinPDLPatternsPass(options);
+    //     });
+    //   }
+    // }
+    passManager.addPass(createSpecializeExportsPass());
+    {
+      OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
+      if (options.enableTensorUKernels) {
+        modulePassManager.addPass(
+            IREE::ROCM::createApplyBuiltinPDLPatternsDriverPass());
       }
     }
-    passManager.addPass(createSpecializeExportsPass());
     buildLLVMGPUCodegenCommonConfigurationPassPipeline(passManager);
-    OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
-    if (options.enableTensorUKernels) {
-      modulePassManager.addPass(
-          IREE::ROCM::createApplyBuiltinPDLPatternsDriverPass());
+    {
+      OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
+      // OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
+      // if (options.enableTensorUKernels) {
+      //   modulePassManager.addPass(
+      //       IREE::ROCM::createApplyBuiltinPDLPatternsDriverPass());
+      // }
+      modulePassManager.addPass(createMaterializeTuningSpecsPass());
+      modulePassManager.addPass(createMaterializeUserConfigsPass());
+      modulePassManager.addPass(createLLVMGPUSelectLoweringStrategyPass());
     }
-    modulePassManager.addPass(createMaterializeTuningSpecsPass());
-    modulePassManager.addPass(createMaterializeUserConfigsPass());
-    modulePassManager.addPass(createLLVMGPUSelectLoweringStrategyPass());
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,

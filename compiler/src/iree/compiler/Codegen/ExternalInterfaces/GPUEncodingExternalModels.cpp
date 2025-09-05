@@ -240,6 +240,7 @@ static Operation *lowerContractionOpToMultiMmaOp(OpBuilder &builder,
                                                  linalg::LinalgOp linalgOp,
                                                  ValueRange operands,
                                                  TargetAttr targetAttr) {
+  LLVM_DEBUG(llvm::dbgs() << "lowerContractionOpToMultiMmaOp: " << linalgOp << "\n");
   if (!linalgOp.hasPureTensorSemantics()) {
     return nullptr;
   }
@@ -271,9 +272,20 @@ static Operation *lowerContractionOpToMultiMmaOp(OpBuilder &builder,
           IREE::Encoding::MATMUL_RESULT) {
     return nullptr;
   }
-
-  IREE::GPU::DataTiledMMAAttr mma = chooseDataTiledMMAAttr(
+  
+  IREE::GPU::DataTiledMMAAttr mma;
+  auto loweringConfig = getLoweringConfig<IREE::GPU::LoweringConfigAttr>(linalgOp);
+  LLVM_DEBUG(llvm::dbgs() << "loweringConfig: " << loweringConfig << "\n");
+  if (loweringConfig && loweringConfig.getAttributes().getNamed("data_tiled_mma_layout")) {
+    mma = cast<IREE::GPU::DataTiledMMAAttr>(loweringConfig.getAttributes().get("data_tiled_mma_layout"));
+    LLVM_DEBUG(llvm::dbgs() << "contains\n");
+  } else {
+    mma = chooseDataTiledMMAAttr(
       resultEncoding.getElementTypesArray(), targetAttr, resultEncoding);
+  }
+
+  // IREE::GPU::DataTiledMMAAttr mma = chooseDataTiledMMAAttr(
+  //     resultEncoding.getElementTypesArray(), targetAttr, resultEncoding);
   if (!mma) {
     LDBG() << "expect encodings on operand types";
     return nullptr;
@@ -305,11 +317,17 @@ static Operation *lowerContractionOpToMultiMmaOp(OpBuilder &builder,
   SmallVector<utils::IteratorType> iteratorTypes =
       linalgOp.getIteratorTypesArray();
 
+  // DictionaryAttr attrs = linalgOp->getAttrDictionary();
+
   Location loc = linalgOp.getLoc();
   Operation *mmaOp = builder.create<Codegen::InnerTiledOp>(
       loc, operands.take_front(inputs.size()),
       operands.take_back(outputs.size()),
       ArrayRef<AffineMap>{lhsMap, rhsMap, accMap}, iteratorTypes, mma);
+  DictionaryAttr attrs = linalgOp->getAttrDictionary();
+  for (NamedAttribute attr : attrs.getValue()) {
+    mmaOp->setAttr(attr.getName(), attr.getValue());
+  }
   return mmaOp;
 }
 
