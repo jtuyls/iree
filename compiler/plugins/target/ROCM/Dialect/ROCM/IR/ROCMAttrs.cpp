@@ -485,7 +485,7 @@ Attribute TensorUKernelProviderAttr::getDataLayoutForUKernel(
     return {};
   }
   IREE::GPU::TargetAttr targetAttr = getGPUTargetAttr(targetConfiguration);
-  if (!targetAttr || targetAttr.getArch() != "gfx942") {
+  if (!targetAttr) {// || targetAttr.getArch() != "gfx942") {
     return {};
   }
   ArrayAttr indexingMapsAttr = encodingAttr.getUserIndexingMaps();
@@ -495,16 +495,27 @@ Attribute TensorUKernelProviderAttr::getDataLayoutForUKernel(
   if (failed(linalg::inferContractionDims(encodingAttr.getRootMaps()))) {
     return {};
   }
-  SmallVector<Type> types = encodingAttr.getElementTypesArray();
-  Type f16 = Float16Type::get(encoding.getContext());
-  Type f32 = Float32Type::get(encoding.getContext());
-  if (types.size() != 3 || types[0] != f16 || types[1] != f16 ||
-      types[2] != f32) {
-    return {};
-  }
-  return IREE::GPU::DataTiledMMAAttr::get(
+  if (targetAttr.getArch() == "gfx950") {
+    return IREE::GPU::DataTiledMMAAttr::get(
       encoding.getContext(), IREE::GPU::MMAIntrinsic::MFMA_F32_16x16x16_F16, 8,
       2, 4, 4, 1);
+    // return IREE::GPU::DataTiledMMAAttr::get(
+    //   encoding.getContext(), IREE::GPU::MMAIntrinsic::MFMA_F32_32x32x16_F16, 4,
+    //   2, 4, 4, 1);
+  }
+  if (targetAttr.getArch() == "gfx942") {
+    SmallVector<Type> types = encodingAttr.getElementTypesArray();
+    Type f16 = Float16Type::get(encoding.getContext());
+    Type f32 = Float32Type::get(encoding.getContext());
+    if (types.size() != 3 || types[0] != f16 || types[1] != f16 ||
+        types[2] != f32) {
+      return {};
+    }
+    return IREE::GPU::DataTiledMMAAttr::get(
+        encoding.getContext(), IREE::GPU::MMAIntrinsic::MFMA_F32_16x16x16_F16, 8,
+        2, 4, 4, 1);
+  }
+  return {};
 }
 
 //===----------------------------------------------------------------------===//

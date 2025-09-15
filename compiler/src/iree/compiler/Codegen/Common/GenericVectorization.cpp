@@ -163,6 +163,7 @@ void GenericVectorizationPass::runOnOperation() {
   // vectorization from bottom to top.
   std::reverse(candidates.begin(), candidates.end());
   for (Operation *op : candidates) {
+    LLVM_DEBUG(llvm::dbgs() << "Candidate: " << *op << "\n");
     SmallVector<int64_t> vectorSizes;
     SmallVector<bool> scalableVecDims;
     if (enableVectorMasking) {
@@ -197,6 +198,7 @@ void GenericVectorizationPass::runOnOperation() {
       (void)IREE::VectorExt::vectorizeLinalgExtGatherToTransferGather(
           rewriter, gatherOp, vectorSizes);
     } else {
+      LLVM_DEBUG(llvm::dbgs() << "--linalg::vectorize\n");
       FailureOr<linalg::VectorizationResult> result =
           linalg::vectorize(rewriter, op, vectorSizes, scalableVecDims,
                             /*vectorizeNDExtract=*/true);
