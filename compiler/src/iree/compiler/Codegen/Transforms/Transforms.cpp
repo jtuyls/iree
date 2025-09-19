@@ -959,6 +959,7 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
       return rewriter.notifyMatchFailure(
           loop, "Single for loop return value is not forall result");
     }
+    LLVM_DEBUG(llvm::dbgs() << "forall: " << forallOp << "\n");
 
     // Verify that all other operations within the loop are only used by
     // implicit capture within the scf.forall.
@@ -967,16 +968,21 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
     SmallVector<Operation *> operationsToMove;
     for (Operation &op : loopBody->getOperations()) {
       if (&op == forallOp || &op == loopBody->getTerminator()) {
+        LLVM_DEBUG(llvm::dbgs() << "continue\n");
         continue;
       }
 
       if (op.getNumRegions() != 0 || isa<TilingInterface>(&op)) {
+        LLVM_DEBUG(llvm::dbgs() << "unimplemented: hoisting of tilable or region op: " << op << "\n");
+        LLVM_DEBUG(llvm::dbgs() << "op.getNumRegions() != 0: " << (op.getNumRegions() != 0) << "\n");
+        LLVM_DEBUG(llvm::dbgs() << "isa<TilingInterface>(&op): " << isa<TilingInterface>(&op) << "\n");
         return rewriter.notifyMatchFailure(
             loop, "unimplemented: hoisting of tilable or region ops.");
       }
 
       for (Value operand : op.getOperands()) {
         if (operand == iterArg) {
+          LLVM_DEBUG(llvm::dbgs() << "Found non forall op that depends on loop iter arg\n");
           return rewriter.notifyMatchFailure(
               loop, "Found non forall op that depends on loop iter arg.");
         }
@@ -984,6 +990,7 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
 
       for (Operation *user : op.getUsers()) {
         if (user == forallOp) {
+          LLVM_DEBUG(llvm::dbgs() << "Operation within loop body used by forall op: " << *user << "\n");
           return rewriter.notifyMatchFailure(
               loop, "Operation within loop body used by forall op.");
         }
@@ -1031,6 +1038,7 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
           // Fail if the destination has more users than a direct insert and
           // extract slice unless it is a single trip loop.
           if (!isSingleTripLoop) {
+            LLVM_DEBUG(llvm::dbgs() << "!isSingleTripLoop\n");
             return failure();
           }
           continue;
@@ -1108,6 +1116,8 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
         slice.set_union(tmpBackwardSlice);
       }
     }
+
+    LLVM_DEBUG(llvm::dbgs() << "TEST\n");
 
     // An operation is safe to hoist if it is speculatable and none of its
     // operands depend on the serial loop.
@@ -1231,6 +1241,7 @@ struct HoistForallFromFor : public OpRewritePattern<scf::ForOp> {
     }
     rewriter.eraseOp(parallelTerminator);
     rewriter.replaceOp(loop, newForallOp);
+    LLVM_DEBUG(llvm::dbgs() << "Success\n");
     return success();
   }
 };

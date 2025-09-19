@@ -699,6 +699,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     if (i == mDims.size() - 1)
       workgroupTileSizes[mDim] *= schedule->mSize;
     subgroupTileSizes[mDim] = schedule->mTileSizes[i];
+    LLVM_DEBUG(llvm::dbgs() << "workgroupTileSizes[mDim] = " << workgroupTileSizes[mDim] << "\n");
   }
   for (auto [i, nDim] : llvm::enumerate(nDims)) {
     workgroupTileSizes[nDim] =
@@ -729,18 +730,18 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   attrs.emplace_back(StringAttr::get(context, "subgroup"),
                      b.getI64ArrayAttr(subgroupTileSizes));
   attrs.emplace_back(StringAttr::get(context, "mma_kind"), kind);
-  Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
-  SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
-  SmallVector<int64_t> promotionList = {0, 1};
-  if (scaled) {
-    promotionArray.append({useGlobalDma, useGlobalDma});
-    promotionList.append({2, 3});
-  }
-  ArrayRef<Attribute> promotionTypes = useDirectLoad
-                                           ? ArrayRef<Attribute>(promotionArray)
-                                           : ArrayRef<Attribute>{};
-  GPU::appendPromotedOperandsList(context, attrs, promotionList,
-                                  promotionTypes);
+  // Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
+  // SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
+  // SmallVector<int64_t> promotionList = {0, 1};
+  // if (scaled) {
+  //   promotionArray.append({useGlobalDma, useGlobalDma});
+  //   promotionList.append({2, 3});
+  // }
+  // ArrayRef<Attribute> promotionTypes = useDirectLoad
+  //                                          ? ArrayRef<Attribute>(promotionArray)
+  //                                          : ArrayRef<Attribute>{};
+  // GPU::appendPromotedOperandsList(context, attrs, promotionList,
+  //                                 promotionTypes);
   if (!mustBeAligned || couldNeedPadding) {
     SmallVector<int64_t> paddingTileSizes = workgroupTileSizes;
 
@@ -776,7 +777,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
       targetSubgroupSize *
       ShapedType::getNumElements(schedule->nSubgroupCounts) *
       ShapedType::getNumElements(schedule->mSubgroupCounts);
-
+  LLVM_DEBUG(llvm::dbgs() << "loweringConfig: " << loweringConfig << "\n");
   return std::make_pair(loweringConfig, flatWorkgroupSize);
 }
 
@@ -861,6 +862,7 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
 LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
                                       mlir::FunctionOpInterface entryPoint,
                                       Operation *op, bool useDirectLoad) {
+  LLVM_DEBUG(llvm::dbgs() << "setMatmulLoweringConfig\n");
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp ||
       (!linalg::isaContractionOpInterface(linalgOp) &&
@@ -895,10 +897,11 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   }
   std::array<int64_t, 3> workgroupSize = {configAndWgSize->second, 1, 1};
   LoweringConfigAttr loweringConfig = configAndWgSize->first;
+  LLVM_DEBUG(llvm::dbgs() << "workgroupSize: " << llvm::interleaved_array(workgroupSize) << "\n");
 
   SmallVector<NamedAttribute, 1> pipelineAttrs;
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
-      linalgOp->getContext(), /*prefetchSharedMemory=*/true,
+      linalgOp->getContext(), /*prefetchSharedMemory=*/false,
       /*no_reduce_shared_memory_bank_conflicts=*/useDirectLoad,
       /*use_igemm_convolution=*/false,
       /*reorder_workgroups_strategy=*/std::nullopt);

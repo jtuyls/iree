@@ -228,6 +228,25 @@ static LogicalResult canTargetIntrinsic(const GPUMatmulShapeType &problem,
   assert(intrinsic.mSizes.size() == 1 && intrinsic.nSizes.size() == 1 &&
          intrinsic.kSizes.size() <= 2 &&
          "expected intrinsic to have a single M, N, and K <= 2 dimensions.");
+  // LLVM_DEBUG(llvm::dbgs() << "--preferredSubgroupSize: " << preferredSubgroupSize << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--canUpcastAcc: " << canUpcastAcc << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--mustBeAligned: " << mustBeAligned << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "problem:\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--mSizes: " << llvm::interleaved_array(problem.mSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--nSizes: " << llvm::interleaved_array(problem.nSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--kSizes: " << llvm::interleaved_array(problem.kSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--batchSizes: " << llvm::interleaved_array(problem.batchSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--aType: " << problem.aType << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--bType: " << problem.bType << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--cType: " << problem.cType << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "intrinsic:\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--mSizes: " << llvm::interleaved_array(intrinsic.mSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--nSizes: " << llvm::interleaved_array(intrinsic.nSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--kSizes: " << llvm::interleaved_array(intrinsic.kSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--batchSizes: " << llvm::interleaved_array(intrinsic.batchSizes) << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--aType: " << problem.aType << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--bType: " << problem.bType << "\n");
+  // LLVM_DEBUG(llvm::dbgs() << "--cType: " << problem.cType << "\n");
   if (problem.aType != intrinsic.aType || problem.bType != intrinsic.bType) {
     return failure(); // Cannot use this intrinsic for mismatched types
   }
@@ -237,6 +256,7 @@ static LogicalResult canTargetIntrinsic(const GPUMatmulShapeType &problem,
     bool isUpcast = problem.cType.getIntOrFloatBitWidth() <
                     intrinsic.cType.getIntOrFloatBitWidth();
     if (!(canUpcastAcc && isFpCase && isUpcast)) {
+      LLVM_DEBUG(llvm::dbgs() << "Cannot use this intrinsic if not upcasting.\n");
       return failure(); // Cannot use this intrinsic if not upcasting.
     }
   }
@@ -245,6 +265,7 @@ static LogicalResult canTargetIntrinsic(const GPUMatmulShapeType &problem,
     if ((problem.mSizes.back() % intrinsic.mSizes[0] != 0 ||
          problem.nSizes.back() % intrinsic.nSizes[0] != 0 ||
          problem.kSizes.back() % intrinsic.kSizes[0] != 0)) {
+      LLVM_DEBUG(llvm::dbgs() << "mustBeAligned failed\n");
       return failure();
     }
     return success();
@@ -262,15 +283,19 @@ static LogicalResult canTargetIntrinsic(const GPUMatmulShapeType &problem,
   // Once a precise threshold is established, replace 4 with the threshold and
   // remove this todo.
   if (llvm::all_equal({problem.mSizes.size(), problem.nSizes.size(),
-                       problem.kSizes.size(), size_t{1}}) &&
+                      size_t{1}}) &&
+      (problem.kSizes.size() == 1 || problem.kSizes.size() == 2) &&
       problem.batchSizes.empty()) {
+        // (problem.kSizes.size() == 1 || problem.kSizes.size() == 1),
     int64_t mSize = problem.mSizes.back();
     int64_t nSize = problem.nSizes.back();
     if ((mSize <= kVerySkinnyDimThreshold && (nSize > preferredSubgroupSize)) ||
         (nSize <= kVerySkinnyDimThreshold && (mSize > preferredSubgroupSize))) {
+      LLVM_DEBUG(llvm::dbgs() << "skinny fialed\n");
       return failure();
     }
   }
+  LLVM_DEBUG(llvm::dbgs() << "canTargetIntrinsic SUCCES\n");
   return success();
 }
 
