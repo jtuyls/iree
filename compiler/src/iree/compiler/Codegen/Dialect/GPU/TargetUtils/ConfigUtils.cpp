@@ -734,6 +734,8 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   // SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
   // SmallVector<int64_t> promotionList = {0, 1};
   // if (scaled) {
+  //   // promotionArray = {};
+  //   // promotionList = {};
   //   promotionArray.append({useGlobalDma, useGlobalDma});
   //   promotionList.append({2, 3});
   // }
