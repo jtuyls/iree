@@ -730,20 +730,20 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   attrs.emplace_back(StringAttr::get(context, "subgroup"),
                      b.getI64ArrayAttr(subgroupTileSizes));
   attrs.emplace_back(StringAttr::get(context, "mma_kind"), kind);
-  // Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
-  // SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
-  // SmallVector<int64_t> promotionList = {0, 1};
-  // if (scaled) {
-  //   // promotionArray = {};
-  //   // promotionList = {};
-  //   promotionArray.append({useGlobalDma, useGlobalDma});
-  //   promotionList.append({2, 3});
-  // }
-  // ArrayRef<Attribute> promotionTypes = useDirectLoad
-  //                                          ? ArrayRef<Attribute>(promotionArray)
-  //                                          : ArrayRef<Attribute>{};
-  // GPU::appendPromotedOperandsList(context, attrs, promotionList,
-  //                                 promotionTypes);
+  Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
+  SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
+  SmallVector<int64_t> promotionList = {0, 1};
+  if (scaled) {
+    promotionArray = {};
+    // promotionList = {};
+    // promotionArray.append({useGlobalDma, useGlobalDma});
+    promotionList.append({2, 3});
+  }
+  ArrayRef<Attribute> promotionTypes = useDirectLoad
+                                           ? ArrayRef<Attribute>(promotionArray)
+                                           : ArrayRef<Attribute>{};
+  GPU::appendPromotedOperandsList(context, attrs, promotionList,
+                                  promotionTypes);
   if (!mustBeAligned || couldNeedPadding) {
     SmallVector<int64_t> paddingTileSizes = workgroupTileSizes;
 
