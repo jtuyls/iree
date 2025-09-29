@@ -79,6 +79,55 @@ def IREEGPU_MmaInterfaceAttr
   }];
 }
 
+// def IREEGPU_ScaledMmaInterfaceAttr
+//     : AttrInterface<"ScaledMmaInterfaceAttr", [IREECodegen_InnerTileDescAttrInterface]> {
+//   let cppNamespace = "::mlir::iree_compiler::IREE::GPU";
+
+//   let description = [{
+//     Interface used to query information needed to generate code targeting a
+//     specific Scaled Matrix Multiply-Accumulate (ScaledMMA) machine intrinsic
+//     instruction. Layout information can be explicit or opaque, however all
+//     such attributes must specify the static shape of the operation and the
+//     required element types.
+//   }];
+
+//   // Methods included to preserve interfaces from beforet he InnerTileDescAttrInterface
+//   // refactoring.
+//   let extraClassDeclaration = [{
+//     // Return all supported element types for inputs
+//     static SmallVector<Type> getSupportedInputTypes(MLIRContext *ctx);
+//     static SmallVector<Type> getSupportedOutputTypes(MLIRContext *ctx);
+
+//     /// For scaled MFMA intrinsics, the scales are packed into a 32 bit register.
+//     /// Since scales are 8 bits, the intrinsic takes a vector of 4 scales, along
+//     /// with a selector to indicate which scale is used.
+//     int64_t getScalesVectorSize() const {
+//       return 4;
+//     }
+
+//     // Return the number of elements per shared scale.
+//     int64_t getBlockSize() const;
+
+//     // Return preferred subgroup size
+//     int64_t getSubgroupSize() const;
+
+//     /// Returns the shape of the scaled MMA operation:
+//     /// ```
+//     ///   C += A * B
+//     /// ```
+//     /// Where, up to some transpositions, `A` has shape `<M, K, KB>`, `B`
+//     /// has shape `<K, KB, N>`, and `C` has shape `<M, N>`.
+//     ::std::tuple<int64_t, int64_t, int64_t, int64_t>
+//     getScaledMNKShape() const {
+//       ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
+//       getUndistributedTileTypes(preThreadTypes);
+//       ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[4].getShape();
+//       ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
+//       return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
+//     }
+//   }];
+// }
+
 def IREEGPU_AnyMmaAttr : Attr<Or<[
   CPred<"isa<IREE::GPU::MmaInterfaceAttr>($_self)">,
 ]>, "buffer-like constant attribute values"> {
