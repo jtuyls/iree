@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "llvm/Support/InterleavedRange.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
@@ -24,6 +25,7 @@ namespace {
 /// shape is same as the size of the subview. In such cases, the subview can
 /// be folded into its source.
 static bool isTrivialSubViewOp(memref::SubViewOp subviewOp) {
+  LLVM_DEBUG(llvm::dbgs() << "isTrivialSubViewOp: " << subviewOp << "\n");
   if (subviewOp.getSourceType().getRank() != subviewOp.getType().getRank())
     return false;
 
@@ -65,6 +67,10 @@ static bool isTrivialSubViewOp(memref::SubViewOp subviewOp) {
       shapeAwareProducer.getResultDynamicDimsFromValue(opResult);
   SmallVector<OpFoldResult> sourceMixedSizes =
       getMixedValues(sourceShape, sourceDynamicSizes, subviewOp.getContext());
+  LLVM_DEBUG(llvm::dbgs() << "success: " << llvm::equal(sourceMixedSizes, subviewOp.getMixedSizes()) << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "subviewOp.getMixedSizes(): " << llvm::interleaved_array(subviewOp.getMixedSizes()) << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "sourceMixedSizes: " << llvm::interleaved_array(sourceMixedSizes) << "\n");
+  // return true;
   return llvm::equal(sourceMixedSizes, subviewOp.getMixedSizes());
 }
 
