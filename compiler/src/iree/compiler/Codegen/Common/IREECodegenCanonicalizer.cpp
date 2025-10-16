@@ -65,7 +65,8 @@ static bool isTrivialSubViewOp(memref::SubViewOp subviewOp) {
       shapeAwareProducer.getResultDynamicDimsFromValue(opResult);
   SmallVector<OpFoldResult> sourceMixedSizes =
       getMixedValues(sourceShape, sourceDynamicSizes, subviewOp.getContext());
-  return llvm::equal(sourceMixedSizes, subviewOp.getMixedSizes());
+  // return llvm::equal(sourceMixedSizes, subviewOp.getMixedSizes());
+  return true;
 }
 
 /// Canonicalize subview ops that are no-ops, using Util::ShapeAwareOpInterface

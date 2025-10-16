@@ -16,6 +16,8 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#define DEBUG_TYPE "iree-decompose-map-scatter"
+
 namespace mlir::iree_compiler::IREE::LinalgExt {
 
 #define GEN_PASS_DEF_DECOMPOSEMAPSCATTERPASS
@@ -120,6 +122,75 @@ static Value createFlatOutputBuffer(RewriterBase &rewriter, Location loc,
                                            collapsedShape, collapsedStrides);
 }
 
+static Value create2DOutputBuffer(RewriterBase &rewriter, Location loc,
+                                    Value outputBuffer,
+                                    ArrayRef<OpFoldResult> sizes,
+                                    SmallVectorImpl<Value> &strides) {
+  auto outputBufferType = cast<MemRefType>(outputBuffer.getType());
+  SmallVector<ReassociationIndices> reassociations;
+  reassociations.push_back(
+      llvm::to_vector(llvm::seq<int64_t>(outputBufferType.getRank() - 1)));
+  reassociations.push_back({outputBufferType.getRank() - 1});
+  if (memref::CollapseShapeOp::isGuaranteedCollapsible(outputBufferType,
+                                                       reassociations)) {
+    return memref::CollapseShapeOp::create(rewriter, loc, outputBuffer,
+                                           reassociations);
+  }
+  auto stridedMetadataOp =
+      memref::ExtractStridedMetadataOp::create(rewriter, loc, outputBuffer);
+  strides.append(stridedMetadataOp.getStrides().begin(),
+                 stridedMetadataOp.getStrides().end());
+  Value offset = stridedMetadataOp.getOffset();
+  OpFoldResult collapsedSize =
+      IREE::LinalgExt::computeProductUsingAffine(rewriter, loc, sizes);
+  SmallVector<OpFoldResult> collapsedShape = {collapsedSize};
+  SmallVector<OpFoldResult> collapsedStrides = {rewriter.getIndexAttr(1)};
+  return memref::ReinterpretCastOp::create(rewriter, loc, outputBuffer, offset,
+                                           collapsedShape, collapsedStrides);
+}
+
+// /// Decompose the `map_scatter` into a sequence of `vector.extract` and
+// /// `vector.store` operations.
+// static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
+//                                           RewriterBase &rewriter) {
+//   OpBuilder::InsertionGuard g(rewriter);
+//   rewriter.setInsertionPoint(mapScatterOp);
+//   Location loc = mapScatterOp.getLoc();
+//   auto inputType = cast<VectorType>(mapScatterOp.getInputType());
+//   SmallVector<Value> ubs =
+//       llvm::map_to_vector(inputType.getShape().drop_back(), [&](int64_t dim) {
+//         return arith::ConstantIndexOp::create(rewriter, loc, dim).getResult();
+//       });
+//   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+//   SmallVector<Value> steps(ubs.size(), one);
+//   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+//   SmallVector<Value> lbs(ubs.size(), zero);
+//   auto buildBody = [&](OpBuilder &builder, Location loc, ValueRange ivs) {
+//     auto inlineBodyBuilder = [&](OpBuilder &inlineBuilder, Location inlineLoc,
+//                                  ArrayRef<Value> yieldedValues) {
+//       SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
+//       auto extractOp = vector::ExtractOp::create(
+//           rewriter, inlineLoc, mapScatterOp.getInput(), inputIndices);
+//       // Drop the mask (last element) from the yielded values to get the output
+//       // indices.
+//       vector::StoreOp::create(rewriter, inlineLoc, extractOp.getResult(),
+//                               mapScatterOp.getOutput(),
+//                               yieldedValues.drop_back());
+//     };
+//     SmallVector<Value> newArgs(ivs);
+//     newArgs.push_back(zero);
+//     mapScatterOp.inlineMapScatterBody(builder, loc, newArgs, inlineBodyBuilder);
+//   };
+//   scf::LoopNest loopNest =
+//       scf::buildLoopNest(rewriter, loc, lbs, ubs, steps, buildBody);
+//   for (scf::ForOp forOp : loopNest.loops) {
+//     if (failed(loopUnrollFull(forOp))) {
+//       return failure();
+//     }
+//   }
+//   return success();
+// }
+
 /// Decompose the `map_scatter` into a sequence of `vector.extract` and
 /// `vector.store` operations.
 static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
@@ -127,40 +198,185 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(mapScatterOp);
   Location loc = mapScatterOp.getLoc();
+  SmallVector<OpFoldResult> outputSizes =
+      memref::getMixedSizes(rewriter, loc, mapScatterOp.getOutput());
+  SmallVector<Value> strides;
+  Value flatOutputBuffer = createFlatOutputBuffer(
+      rewriter, loc, mapScatterOp.getOutput(), outputSizes, strides);
+
   auto inputType = cast<VectorType>(mapScatterOp.getInputType());
-  SmallVector<Value> ubs =
-      llvm::map_to_vector(inputType.getShape().drop_back(), [&](int64_t dim) {
-        return arith::ConstantIndexOp::create(rewriter, loc, dim).getResult();
-      });
-  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  SmallVector<Value> steps(ubs.size(), one);
-  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  SmallVector<Value> lbs(ubs.size(), zero);
-  auto buildBody = [&](OpBuilder &builder, Location loc, ValueRange ivs) {
-    auto inlineBodyBuilder = [&](OpBuilder &inlineBuilder, Location inlineLoc,
+  auto bodyBuilder = [&](OpBuilder &b, Location nestedLoc, ValueRange args) {
+    auto inlineBodyBuilder = [&](OpBuilder inlineBuilder, Location inlineLoc,
                                  ArrayRef<Value> yieldedValues) {
-      SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
-      auto extractOp = vector::ExtractOp::create(
-          rewriter, inlineLoc, mapScatterOp.getInput(), inputIndices);
-      // Drop the mask (last element) from the yielded values to get the output
-      // indices.
-      vector::StoreOp::create(rewriter, inlineLoc, extractOp.getResult(),
-                              mapScatterOp.getOutput(),
-                              yieldedValues.drop_back());
+      SmallVector<Value> outputIndices(yieldedValues.drop_back());
+      LLVM_DEBUG(llvm::dbgs() << "outputIndices: " << outputIndices.size() << "\n");
+      // Value mask = outputIndices.pop_back_val();
+      Value linearIdx;
+      // If strides are empty, this means that the memref layout was contiguous,
+      // so we can simply linearize the indices based on the shape. Otherwise,
+      // use the strides to compute the linear index.
+      if (strides.empty()) {
+        linearIdx = affine::AffineLinearizeIndexOp::create(
+            inlineBuilder, inlineLoc, outputIndices, outputSizes,
+            /*disjoint=*/true);
+      } else {
+        linearIdx = arith::ConstantIndexOp::create(inlineBuilder, inlineLoc, 0);
+        for (auto [outputIdx, stride] :
+             llvm::zip_equal(outputIndices, strides)) {
+          Value stridedOutputIdx = arith::MulIOp::create(
+              inlineBuilder, inlineLoc, outputIdx, stride);
+          linearIdx = arith::AddIOp::create(inlineBuilder, inlineLoc, linearIdx,
+                                            stridedOutputIdx);
+        }
+      }
+      linalg::YieldOp::create(inlineBuilder, inlineLoc,
+                              ValueRange{linearIdx});
     };
-    SmallVector<Value> newArgs(ivs);
-    newArgs.push_back(zero);
-    mapScatterOp.inlineMapScatterBody(builder, loc, newArgs, inlineBodyBuilder);
+    SmallVector<Value> indices = llvm::map_to_vector(
+        llvm::seq<int64_t>(inputType.getRank()), [&](int64_t dim) -> Value {
+          return linalg::IndexOp::create(b, nestedLoc, b.getIndexType(), dim);
+        });
+    mapScatterOp.inlineMapScatterBody(b, nestedLoc, indices, inlineBodyBuilder);
   };
-  scf::LoopNest loopNest =
-      scf::buildLoopNest(rewriter, loc, lbs, ubs, steps, buildBody);
-  for (scf::ForOp forOp : loopNest.loops) {
-    if (failed(loopUnrollFull(forOp))) {
-      return failure();
+  SmallVector<int64_t> shape(inputType.getShape());
+  // const int64_t innerSize = shape[shape.size() - 1];
+  shape[shape.size() - 1] = 1;
+  auto idxInit = tensor::EmptyOp::create(rewriter, loc, shape,
+                                         rewriter.getIndexType());
+  // auto maskInit = tensor::EmptyOp::create(rewriter, loc, shape,
+  //                                         rewriter.getIntegerType(1));
+  SmallVector<AffineMap> maps(
+      1, rewriter.getMultiDimIdentityMap(inputType.getRank()));
+  SmallVector<utils::IteratorType> iterTypes(inputType.getRank(),
+                                             utils::IteratorType::parallel);
+  SmallVector<Value> outs = {idxInit.getResult()};
+  auto genericOp =
+      linalg::GenericOp::create(rewriter, loc, TypeRange(outs), ValueRange(),
+                                outs, maps, iterTypes, bodyBuilder);
+                          
+  LLVM_DEBUG(llvm::dbgs() << "genericOp: " << genericOp << "\n");
+
+  // Lower linearize and delinearize ops before vectorizing, because the
+  // vectorizer can't handle them.
+  SmallVector<affine::AffineLinearizeIndexOp> linearizeOps(
+      genericOp.getBody()->getOps<affine::AffineLinearizeIndexOp>());
+  for (auto linearizeOp : linearizeOps) {
+    rewriter.setInsertionPoint(linearizeOp);
+    if (failed(affine::lowerAffineLinearizeIndexOp(rewriter, linearizeOp))) {
+      return rewriter.notifyMatchFailure(
+          linearizeOp, "failed to lower affine.linearize_index op");
     }
   }
+  SmallVector<affine::AffineDelinearizeIndexOp> delinearizeOps(
+      genericOp.getBody()->getOps<affine::AffineDelinearizeIndexOp>());
+  for (auto delinearizeOp : delinearizeOps) {
+    rewriter.setInsertionPoint(delinearizeOp);
+    if (failed(
+            affine::lowerAffineDelinearizeIndexOp(rewriter, delinearizeOp))) {
+      return rewriter.notifyMatchFailure(
+          delinearizeOp, "failed to lower affine.delinearize_index op");
+    }
+  }
+
+  FailureOr<linalg::VectorizationResult> result =
+      linalg::vectorize(rewriter, genericOp);
+  if (failed(result)) {
+    return rewriter.notifyMatchFailure(mapScatterOp,
+                                       "failed to generate index vector");
+  }
+
+  auto indexWriteOp =
+      result->replacements[0].getDefiningOp<vector::TransferWriteOp>();
+  // auto maskWriteOp =
+  //     result->replacements[1].getDefiningOp<vector::TransferWriteOp>();
+  if (!indexWriteOp) {
+    return failure();
+  }
+  Value indexVector = indexWriteOp.getVector();
+  LLVM_DEBUG(llvm::dbgs() << "indexVector: " << indexVector << "\n");
+  // Value maskVector = maskWriteOp.getVector();
+  // Erase unused tensor ops after vectorizing the linalg.generic.
+  rewriter.eraseOp(indexWriteOp);
+  // rewriter.eraseOp(maskWriteOp);
+  rewriter.eraseOp(genericOp);
+
+  // Flatten all the vectors, since the scatter op lowering expects 1D vectors.
+  // TODO: llvm::product_of
+  int64_t flatIndexSize = llvm::product_of(shape);
+  int64_t flatVectorSize =
+      std::reduce(inputType.getShape().begin(), inputType.getShape().end(), 1,
+                  std::multiplies<int64_t>());
+  rewriter.setInsertionPoint(mapScatterOp);
+  auto flatIndexType =
+      VectorType::get({flatIndexSize}, rewriter.getIndexType());
+  indexVector =
+      vector::ShapeCastOp::create(rewriter, loc, flatIndexType, indexVector);
+  // auto flatMaskType =
+  //     VectorType::get({flatVectorSize}, rewriter.getIntegerType(1));
+  // maskVector =
+  //     vector::ShapeCastOp::create(rewriter, loc, flatMaskType, maskVector);
+  auto flatInputType =
+      VectorType::get({flatIndexSize, flatVectorSize / flatIndexSize}, inputType.getElementType());
+  LLVM_DEBUG(llvm::dbgs() << "flatInputType: " << flatInputType << "\n");
+  Value inputVector = vector::ShapeCastOp::create(rewriter, loc, flatInputType,
+                                                  mapScatterOp.getInput());
+  // auto outputType = cast<MemrefType>(mapScatterOp.getOutputType());
+  // int64_t flatOutputSize = llvm::product_of(outputType.getShape());
+  // auto outputType2D =
+  //     VectorType::get({flatOutputSize, flatOutputSize / innerSize}, outputType.getElementType());
+  // Value outputVector = vector::ShapeCastOp::create(rewriter, loc, outputType2D,
+  //                                                 flatOutputBuffer);
+
+  // SmallVector<Value> offsets = {
+  //     arith::ConstantIndexOp::create(rewriter, loc, 0)};
+  // rewriter.replaceOpWithNewOp<vector::ScatterOp>(mapScatterOp, flatOutputBuffer,
+  //                                                offsets, indexVector,
+  //                                                maskVector, inputVector);
+  // auto inputType = cast<VectorType>(mapScatterOp.getInputType());
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  for (int64_t i = 0; i < flatIndexSize; ++i) {
+    Value index = arith::ConstantIndexOp::create(rewriter, loc, i);
+    auto extractIndex = vector::ExtractOp::create(
+      rewriter, loc, indexVector, index);
+    auto extractValue = vector::ExtractOp::create(
+      rewriter, loc, inputVector, index);
+    vector::StoreOp::create(rewriter, loc, extractValue.getResult(),
+                              flatOutputBuffer,
+                              {extractIndex});
+  }
+  // Value ub = arith::ConstantIndexOp::create(rewriter, loc, flatIndexSize);
+  // Value step = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // Value lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  // auto buildBody = [&](OpBuilder &builder, Location loc, ValueRange ivs) {
+  //   // auto inlineBodyBuilder = [&](OpBuilder &inlineBuilder, Location inlineLoc,
+  //   //                              ArrayRef<Value> yieldedValues) {
+  //   //   SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
+  //   //   auto extractOp = vector::ExtractOp::create(
+  //   //       rewriter, inlineLoc, mapScatterOp.getInput(), inputIndices);
+  //   //   // Drop the mask (last element) from the yielded values to get the output
+  //   //   // indices.
+  //   //   vector::StoreOp::create(rewriter, inlineLoc, extractOp.getResult(),
+  //   //                           flatOutputBuffer,
+  //   //                           yieldedValues.drop_back());
+  //   // };
+  //   // SmallVector<Value> newArgs(ivs);
+  //   // newArgs.push_back(zero);
+  //   // mapScatterOp.inlineMapScatterBody(builder, loc, newArgs, inlineBodyBuilder);
+  //   SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
+  //   // OpFoldResult index = inputIndices[0];
+  //   auto extractIndex = vector::ExtractOp::create(
+  //     rewriter, loc, indexVector, inputIndices);
+  //   auto extractValue = vector::ExtractOp::create(
+  //     rewriter, loc, inputVector, inputIndices);
+  //   vector::StoreOp::create(rewriter, loc, extractValue.getResult(),
+  //                             flatOutputBuffer,
+  //                             extractIndex.getResult());
+  // };
+  // scf::LoopNest loopNest =
+  //     scf::buildLoopNest(rewriter, loc, {lb}, {ub}, {step}, buildBody);
   return success();
 }
+
 
 /// Decompose an iree_linalg_ext.map_scatter op with a vector input, and a
 /// memref output. The map_scatter op is lowered into a sequence of vector ops
@@ -174,25 +390,23 @@ static LogicalResult decomposeMapScatter(MapScatterOp mapScatterOp,
   Location loc = mapScatterOp.getLoc();
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(mapScatterOp);
-  const int64_t bitWidth = mapScatterOp.getInputType().getElementTypeBitWidth();
-  // In case of a sub-byte bitwidth, we check that there is a contiguous copy
-  // on the inner dimension that is a multiple of a byte size and decompose into
-  // a sequence of vector extract/stores operations if possible.
-  if (bitWidth < 8) {
-    Block &transformBody = mapScatterOp.getTransformationRegion().front();
-    SmallVector<Value> args(transformBody.getArguments());
-    Value innermostInputIdx = args[args.size() - 1];
-    auto bodyYield =
-        cast<IREE::LinalgExt::YieldOp>(transformBody.getTerminator());
-    Value innermostOutputIdx =
-        bodyYield.getOperand(bodyYield.getNumOperands() - 2);
-    if (isUnitFunctionOf(innermostOutputIdx, innermostInputIdx)) {
-      if (failed(decomposeToLoadStore(mapScatterOp, rewriter))) {
-        return failure();
-      }
-      rewriter.eraseOp(mapScatterOp);
-      return success();
+  Value innermostInputIdx =
+      mapScatterOp.getInputIndex(mapScatterOp.getInputRank() - 1);
+  Value innermostOutputIdx =
+      mapScatterOp.getOutputIndex(mapScatterOp.getOutputRank() - 1);
+  if (isUnitFunctionOf(innermostOutputIdx, innermostInputIdx)) {
+    if (failed(decomposeToLoadStore(mapScatterOp, rewriter))) {
+      return failure();
     }
+    rewriter.eraseOp(mapScatterOp);
+    return success();
+  }
+  // In case of a sub-byte map_scatter that hasn't been decomposed into a
+  // sequence of extract/store ops above, there is a  non-contiguous copy on the
+  // inner dimension that is not a multiple of a byte size and the map_scatter
+  // can't be vectorized, so fail.
+  const int64_t bitWidth = mapScatterOp.getInputType().getElementTypeBitWidth();
+  if (bitWidth < 8) {
     return mapScatterOp.emitOpError() << "with an access on a sub-byte type "
                                          "that is not a multiple of the byte "
                                          "size can't be vectorized";
@@ -250,7 +464,7 @@ static LogicalResult decomposeMapScatter(MapScatterOp mapScatterOp,
                                 outs, maps, iterTypes, bodyBuilder);
 
   // Lower linearize and delinearize ops before vectorizing, because the
-  // vectorizer can't hendle them.
+  // vectorizer can't handle them.
   SmallVector<affine::AffineLinearizeIndexOp> linearizeOps(
       genericOp.getBody()->getOps<affine::AffineLinearizeIndexOp>());
   for (auto linearizeOp : linearizeOps) {
