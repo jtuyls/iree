@@ -153,6 +153,10 @@ static LogicalResult dimIsMultipleOf(PatternRewriter &rewriter, Value value,
 static LogicalResult dimIsBound(PatternRewriter &rewriter, Value value,
                                 Attribute dim, Attribute lowerBound,
                                 Attribute upperBound) {
+  LLVM_DEBUG(llvm::dbgs() << "dimIsBound: " << value << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--dim: " << dim << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--lowerBound: " << lowerBound << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--upperBound: " << upperBound << "\n");
   auto shapedType = dyn_cast<mlir::ShapedType>(value.getType());
   if (!shapedType) {
     return failure();
@@ -191,6 +195,70 @@ static LogicalResult dimIsBound(PatternRewriter &rewriter, Value value,
   return success();
 }
 
+static LogicalResult dimsMultipliedIsBound(PatternRewriter &rewriter, Value value,
+                                  Attribute dimA, Attribute dimB, Attribute lowerBound,
+                                  Attribute upperBound) {
+  LLVM_DEBUG(llvm::dbgs() << "dimsMultipliedIsBound: " << value << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--dimA: " << dimA << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--dimB: " << dimB << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--lowerBound: " << lowerBound << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "--upperBound: " << upperBound << "\n");
+  auto shapedType = dyn_cast<mlir::ShapedType>(value.getType());
+  if (!shapedType) {
+    return failure();
+  }
+  auto dimAInt = dyn_cast<IntegerAttr>(dimA);
+  auto dimBInt = dyn_cast<IntegerAttr>(dimB);
+  if (!dimAInt || !dimBInt) {
+    return failure();
+  }
+  if (dimAInt.getInt() >= shapedType.getRank()) {
+    return failure();
+  }
+  if (dimBInt.getInt() >= shapedType.getRank()) {
+    return failure();
+  }
+  if (auto lowerBoundInt = dyn_cast<IntegerAttr>(lowerBound)) {
+    FailureOr<int64_t> constantLbA =
+        ValueBoundsConstraintSet::computeConstantBound(
+            presburger::BoundType::LB, {value, /*dim=*/dimAInt.getInt()},
+            /*stopCondition=*/nullptr, /*closedLB=*/true);
+    FailureOr<int64_t> constantLbB =
+        ValueBoundsConstraintSet::computeConstantBound(
+            presburger::BoundType::LB, {value, /*dim=*/dimBInt.getInt()},
+            /*stopCondition=*/nullptr, /*closedLB=*/true);
+    if (failed(constantLbA) || failed(constantLbB)) {
+      LLVM_DEBUG(llvm::dbgs() << "failed constantLbA: " << failed(constantLbA)  << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "failed constantLbB: " << failed(constantLbB)  << "\n");
+      return failure();
+    }
+    LLVM_DEBUG(llvm::dbgs() << "constantLbA: " << constantLbA.value() << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "constantLbB: " << constantLbB.value() << "\n");
+    if (lowerBoundInt.getInt() > (constantLbA.value() * constantLbB.value())) {
+      return failure();
+    }
+  }
+  if (auto upperBoundInt = dyn_cast<IntegerAttr>(upperBound)) {
+    FailureOr<int64_t> constantUbA =
+        ValueBoundsConstraintSet::computeConstantBound(
+            presburger::BoundType::UB, {value, /*dim=*/dimAInt.getInt()},
+            /*stopCondition=*/nullptr, /*closedUB=*/true);
+    FailureOr<int64_t> constantUbB =
+        ValueBoundsConstraintSet::computeConstantBound(
+            presburger::BoundType::UB, {value, /*dim=*/dimBInt.getInt()},
+            /*stopCondition=*/nullptr, /*closedUB=*/true);
+    LLVM_DEBUG(llvm::dbgs() << "constantUbA: " << constantUbA.value() << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "constantUbB: " << constantUbB.value() << "\n");
+    if (failed(constantUbA) || failed(constantUbB)) {
+      return failure();
+    }
+    if (upperBoundInt.getInt() < (constantUbA.value() * constantUbB.value())) {
+      return failure();
+    }
+  }
+  return success();
+}
+
 // Populate patterns from builtin.
 static LogicalResult
 populatePDLModuleFromBuiltin(MLIRContext *context, RewritePatternSet &patterns,
@@ -212,6 +280,7 @@ populatePDLModuleFromBuiltin(MLIRContext *context, RewritePatternSet &patterns,
   pdlModule.registerConstraintFunction("hasAttr", hasAttr);
   pdlModule.registerConstraintFunction("dimIsBound", dimIsBound);
   pdlModule.registerConstraintFunction("dimIsMultipleOf", dimIsMultipleOf);
+  pdlModule.registerConstraintFunction("dimsMultipliedIsBound", dimsMultipliedIsBound);
   pdlModule.registerConstraintFunction("matchCastCompatibleType",
                                        matchCastCompatibleType);
   pdlModule.registerConstraintFunction("matchContraction", matchContraction);

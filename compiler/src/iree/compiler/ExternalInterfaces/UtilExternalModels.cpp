@@ -6,6 +6,7 @@
 
 #include "iree/compiler/ExternalInterfaces/UtilExternalModels.h"
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingDialect.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
@@ -20,6 +21,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MLProgram/IR/MLProgram.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/ValueBoundsOpInterface.h"
 
@@ -399,6 +401,30 @@ struct HoistableLinalgOpInterfaceHelper {
   }
 };
 
+struct LoadFromBufferOpInterface
+    : public ValueBoundsOpInterface::ExternalModel<
+          LoadFromBufferOpInterface,
+          IREE::Codegen::LoadFromBufferOp> {
+  void populateBoundsForShapedValueDim(Operation *op, Value value, int64_t dim,
+                                       ValueBoundsConstraintSet &cstr) const {
+    auto loadOp = cast<IREE::Codegen::LoadFromBufferOp>(op);
+    assert(value == loadOp.getResult() && "invalid value");
+    cstr.bound(value)[dim] == cstr.getExpr(loadOp.getBuffer(), dim);
+  }
+};
+
+struct ExpandShapeOpValueBoundsInterface
+    : public ValueBoundsOpInterface::ExternalModel<
+          ExpandShapeOpValueBoundsInterface,
+          memref::ExpandShapeOp> {
+  void populateBoundsForShapedValueDim(Operation *op, Value value, int64_t dim,
+                                       ValueBoundsConstraintSet &cstr) const {
+    auto expandOp = cast<memref::ExpandShapeOp>(op);
+    assert(value == expandOp.getResult() && "invalid value");
+    cstr.bound(value)[dim] ==  expandOp.getOutputShape()[dim];
+  }
+};
+
 } // namespace
 
 void registerUtilExternalModels(DialectRegistry &registry) {
@@ -536,6 +562,18 @@ void registerUtilExternalModels(DialectRegistry &registry) {
       +[](MLIRContext *context, IREE::Util::UtilDialect *dialect) {
         IREE::Util::AssumeIntOp::attachInterface<
             UtilAssumeIntValueBoundsOpInterface>(*context);
+      });
+
+  registry.addExtension(
+      +[](MLIRContext *context, IREE::Codegen::IREECodegenDialect *dialect) {
+        IREE::Codegen::LoadFromBufferOp::attachInterface<
+            LoadFromBufferOpInterface>(*context);
+      });
+
+  registry.addExtension(
+      +[](MLIRContext *context, memref::MemRefDialect *dialect) {
+        memref::ExpandShapeOp::attachInterface<ExpandShapeOpValueBoundsInterface>(
+            *context);
       });
 }
 

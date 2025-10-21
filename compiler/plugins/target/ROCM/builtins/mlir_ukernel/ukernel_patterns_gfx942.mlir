@@ -317,7 +317,9 @@ pdl.pattern @annotate_matmul_like_f16_medium_expanded : benefit(1) {
   // TODO: Kernel specialization is needed to apply this strategy selectively at
   // runtime. Additionally model exports don't specify lower bounds so it is
   // impossible to use this strategy with this check.
-  // pdl.apply_native_constraint "dimIsBound"(%lhs, %c0, %c4, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
+  // %c8 = pdl.attribute = 8
+  pdl.apply_native_constraint "dimsMultipliedIsBound"(%lhs, %c0, %c1, %c1024, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute, !pdl.attribute)
+  // pdl.apply_native_constraint "dimIsBound"(%lhs, %c1, %c128, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
 
   pdl.apply_native_constraint "dimIsBound"(%rhs, %c0, %c1024, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
   pdl.apply_native_constraint "dimIsBound"(%lhs, %c2, %c256, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
@@ -408,7 +410,10 @@ pdl.pattern @annotate_matmul_like_f16_large_expanded : benefit(2) {
   // TODO: Kernel specialization is needed to apply this strategy selectively at
   // runtime. Additionally model exports don't specify lower bounds so it is
   // impossible to use this strategy with this check.
-  // pdl.apply_native_constraint "dimIsBound"(%lhs, %c0, %c4, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
+  // %c16 = pdl.attribute = 16
+  // %c128 = pdl.attribute = 128
+  // pdl.apply_native_constraint "dimIsBound"(%lhs, %c0, %c16, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
+  // pdl.apply_native_constraint "dimIsBound"(%lhs, %c1, %c128, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
 
   pdl.apply_native_constraint "dimIsBound"(%rhs, %c0, %c1024, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
   pdl.apply_native_constraint "dimIsBound"(%lhs, %c2, %c256, %empty : !pdl.value, !pdl.attribute, !pdl.attribute, !pdl.attribute)
