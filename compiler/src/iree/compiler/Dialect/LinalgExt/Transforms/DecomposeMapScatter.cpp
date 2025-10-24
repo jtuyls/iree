@@ -149,47 +149,47 @@ static Value create2DOutputBuffer(RewriterBase &rewriter, Location loc,
                                            collapsedShape, collapsedStrides);
 }
 
-// /// Decompose the `map_scatter` into a sequence of `vector.extract` and
-// /// `vector.store` operations.
-// static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
-//                                           RewriterBase &rewriter) {
-//   OpBuilder::InsertionGuard g(rewriter);
-//   rewriter.setInsertionPoint(mapScatterOp);
-//   Location loc = mapScatterOp.getLoc();
-//   auto inputType = cast<VectorType>(mapScatterOp.getInputType());
-//   SmallVector<Value> ubs =
-//       llvm::map_to_vector(inputType.getShape().drop_back(), [&](int64_t dim) {
-//         return arith::ConstantIndexOp::create(rewriter, loc, dim).getResult();
-//       });
-//   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-//   SmallVector<Value> steps(ubs.size(), one);
-//   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-//   SmallVector<Value> lbs(ubs.size(), zero);
-//   auto buildBody = [&](OpBuilder &builder, Location loc, ValueRange ivs) {
-//     auto inlineBodyBuilder = [&](OpBuilder &inlineBuilder, Location inlineLoc,
-//                                  ArrayRef<Value> yieldedValues) {
-//       SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
-//       auto extractOp = vector::ExtractOp::create(
-//           rewriter, inlineLoc, mapScatterOp.getInput(), inputIndices);
-//       // Drop the mask (last element) from the yielded values to get the output
-//       // indices.
-//       vector::StoreOp::create(rewriter, inlineLoc, extractOp.getResult(),
-//                               mapScatterOp.getOutput(),
-//                               yieldedValues.drop_back());
-//     };
-//     SmallVector<Value> newArgs(ivs);
-//     newArgs.push_back(zero);
-//     mapScatterOp.inlineMapScatterBody(builder, loc, newArgs, inlineBodyBuilder);
-//   };
-//   scf::LoopNest loopNest =
-//       scf::buildLoopNest(rewriter, loc, lbs, ubs, steps, buildBody);
-//   for (scf::ForOp forOp : loopNest.loops) {
-//     if (failed(loopUnrollFull(forOp))) {
-//       return failure();
-//     }
-//   }
-//   return success();
-// }
+/// Decompose the `map_scatter` into a sequence of `vector.extract` and
+/// `vector.store` operations.
+static LogicalResult decomposeToLoadStore1(MapScatterOp mapScatterOp,
+                                          RewriterBase &rewriter) {
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(mapScatterOp);
+  Location loc = mapScatterOp.getLoc();
+  auto inputType = cast<VectorType>(mapScatterOp.getInputType());
+  SmallVector<Value> ubs =
+      llvm::map_to_vector(inputType.getShape().drop_back(), [&](int64_t dim) {
+        return arith::ConstantIndexOp::create(rewriter, loc, dim).getResult();
+      });
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  SmallVector<Value> steps(ubs.size(), one);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  SmallVector<Value> lbs(ubs.size(), zero);
+  auto buildBody = [&](OpBuilder &builder, Location loc, ValueRange ivs) {
+    auto inlineBodyBuilder = [&](OpBuilder &inlineBuilder, Location inlineLoc,
+                                 ArrayRef<Value> yieldedValues) {
+      SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
+      auto extractOp = vector::ExtractOp::create(
+          rewriter, inlineLoc, mapScatterOp.getInput(), inputIndices);
+      // Drop the mask (last element) from the yielded values to get the output
+      // indices.
+      vector::StoreOp::create(rewriter, inlineLoc, extractOp.getResult(),
+                              mapScatterOp.getOutput(),
+                              yieldedValues.drop_back());
+    };
+    SmallVector<Value> newArgs(ivs);
+    newArgs.push_back(zero);
+    mapScatterOp.inlineMapScatterBody(builder, loc, newArgs, inlineBodyBuilder);
+  };
+  scf::LoopNest loopNest =
+      scf::buildLoopNest(rewriter, loc, lbs, ubs, steps, buildBody);
+  for (scf::ForOp forOp : loopNest.loops) {
+    if (failed(loopUnrollFull(forOp))) {
+      return failure();
+    }
+  }
+  return success();
+}
 
 /// Decompose the `map_scatter` into a sequence of `vector.extract` and
 /// `vector.store` operations.
@@ -208,9 +208,9 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
   auto bodyBuilder = [&](OpBuilder &b, Location nestedLoc, ValueRange args) {
     auto inlineBodyBuilder = [&](OpBuilder inlineBuilder, Location inlineLoc,
                                  ArrayRef<Value> yieldedValues) {
-      SmallVector<Value> outputIndices(yieldedValues.drop_back());
+      SmallVector<Value> outputIndices(yieldedValues);
       LLVM_DEBUG(llvm::dbgs() << "outputIndices: " << outputIndices.size() << "\n");
-      // Value mask = outputIndices.pop_back_val();
+      Value mask = outputIndices.pop_back_val();
       Value linearIdx;
       // If strides are empty, this means that the memref layout was contiguous,
       // so we can simply linearize the indices based on the shape. Otherwise,
@@ -230,7 +230,7 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
         }
       }
       linalg::YieldOp::create(inlineBuilder, inlineLoc,
-                              ValueRange{linearIdx});
+                              ValueRange{linearIdx, mask});
     };
     SmallVector<Value> indices = llvm::map_to_vector(
         llvm::seq<int64_t>(inputType.getRank()), [&](int64_t dim) -> Value {
@@ -243,13 +243,13 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
   shape[shape.size() - 1] = 1;
   auto idxInit = tensor::EmptyOp::create(rewriter, loc, shape,
                                          rewriter.getIndexType());
-  // auto maskInit = tensor::EmptyOp::create(rewriter, loc, shape,
-  //                                         rewriter.getIntegerType(1));
+  auto maskInit = tensor::EmptyOp::create(rewriter, loc, shape,
+                                          rewriter.getIntegerType(1));
   SmallVector<AffineMap> maps(
-      1, rewriter.getMultiDimIdentityMap(inputType.getRank()));
+      2, rewriter.getMultiDimIdentityMap(inputType.getRank()));
   SmallVector<utils::IteratorType> iterTypes(inputType.getRank(),
                                              utils::IteratorType::parallel);
-  SmallVector<Value> outs = {idxInit.getResult()};
+  SmallVector<Value> outs = {idxInit.getResult(), maskInit.getResult()};
   auto genericOp =
       linalg::GenericOp::create(rewriter, loc, TypeRange(outs), ValueRange(),
                                 outs, maps, iterTypes, bodyBuilder);
@@ -287,17 +287,18 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
 
   auto indexWriteOp =
       result->replacements[0].getDefiningOp<vector::TransferWriteOp>();
-  // auto maskWriteOp =
-  //     result->replacements[1].getDefiningOp<vector::TransferWriteOp>();
+  auto maskWriteOp =
+      result->replacements[1].getDefiningOp<vector::TransferWriteOp>();
   if (!indexWriteOp) {
     return failure();
   }
   Value indexVector = indexWriteOp.getVector();
   LLVM_DEBUG(llvm::dbgs() << "indexVector: " << indexVector << "\n");
-  // Value maskVector = maskWriteOp.getVector();
+  Value maskVector = maskWriteOp.getVector();
+  LLVM_DEBUG(llvm::dbgs() << "maskVector: " << maskVector << "\n");
   // Erase unused tensor ops after vectorizing the linalg.generic.
   rewriter.eraseOp(indexWriteOp);
-  // rewriter.eraseOp(maskWriteOp);
+  rewriter.eraseOp(maskWriteOp);
   rewriter.eraseOp(genericOp);
 
   // Flatten all the vectors, since the scatter op lowering expects 1D vectors.
@@ -311,10 +312,10 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
       VectorType::get({flatIndexSize}, rewriter.getIndexType());
   indexVector =
       vector::ShapeCastOp::create(rewriter, loc, flatIndexType, indexVector);
-  // auto flatMaskType =
-  //     VectorType::get({flatVectorSize}, rewriter.getIntegerType(1));
-  // maskVector =
-  //     vector::ShapeCastOp::create(rewriter, loc, flatMaskType, maskVector);
+  auto flatMaskType =
+      VectorType::get({flatIndexSize}, rewriter.getIntegerType(1));
+  maskVector =
+      vector::ShapeCastOp::create(rewriter, loc, flatMaskType, maskVector);
   auto flatInputType =
       VectorType::get({flatIndexSize, flatVectorSize / flatIndexSize}, inputType.getElementType());
   LLVM_DEBUG(llvm::dbgs() << "flatInputType: " << flatInputType << "\n");
@@ -336,44 +337,26 @@ static LogicalResult decomposeToLoadStore(MapScatterOp mapScatterOp,
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   for (int64_t i = 0; i < flatIndexSize; ++i) {
     Value index = arith::ConstantIndexOp::create(rewriter, loc, i);
+    auto extractMask = vector::ExtractOp::create(
+      rewriter, loc, maskVector, index);
     auto extractIndex = vector::ExtractOp::create(
       rewriter, loc, indexVector, index);
     auto extractValue = vector::ExtractOp::create(
       rewriter, loc, inputVector, index);
+
+    LLVM_DEBUG(llvm::dbgs() << "extractMask: " << extractMask.getResult() << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "extractIndex: " << extractIndex.getResult() << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "extractValue: " << extractValue.getResult() << "\n");
+    
+    // Only store if mask is true
+    auto ifOp = rewriter.create<scf::IfOp>(loc, extractMask.getResult(), 
+                                           /*withElseRegion=*/false);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(ifOp.thenBlock());
     vector::StoreOp::create(rewriter, loc, extractValue.getResult(),
                               flatOutputBuffer,
                               {extractIndex});
   }
-  // Value ub = arith::ConstantIndexOp::create(rewriter, loc, flatIndexSize);
-  // Value step = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  // Value lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  // auto buildBody = [&](OpBuilder &builder, Location loc, ValueRange ivs) {
-  //   // auto inlineBodyBuilder = [&](OpBuilder &inlineBuilder, Location inlineLoc,
-  //   //                              ArrayRef<Value> yieldedValues) {
-  //   //   SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
-  //   //   auto extractOp = vector::ExtractOp::create(
-  //   //       rewriter, inlineLoc, mapScatterOp.getInput(), inputIndices);
-  //   //   // Drop the mask (last element) from the yielded values to get the output
-  //   //   // indices.
-  //   //   vector::StoreOp::create(rewriter, inlineLoc, extractOp.getResult(),
-  //   //                           flatOutputBuffer,
-  //   //                           yieldedValues.drop_back());
-  //   // };
-  //   // SmallVector<Value> newArgs(ivs);
-  //   // newArgs.push_back(zero);
-  //   // mapScatterOp.inlineMapScatterBody(builder, loc, newArgs, inlineBodyBuilder);
-  //   SmallVector<OpFoldResult> inputIndices = getAsOpFoldResult(ivs);
-  //   // OpFoldResult index = inputIndices[0];
-  //   auto extractIndex = vector::ExtractOp::create(
-  //     rewriter, loc, indexVector, inputIndices);
-  //   auto extractValue = vector::ExtractOp::create(
-  //     rewriter, loc, inputVector, inputIndices);
-  //   vector::StoreOp::create(rewriter, loc, extractValue.getResult(),
-  //                             flatOutputBuffer,
-  //                             extractIndex.getResult());
-  // };
-  // scf::LoopNest loopNest =
-  //     scf::buildLoopNest(rewriter, loc, {lb}, {ub}, {step}, buildBody);
   return success();
 }
 
