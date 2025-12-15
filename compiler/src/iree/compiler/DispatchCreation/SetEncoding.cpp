@@ -101,7 +101,7 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
   // Set encoding on init operand.
   // For now, we assume single init.
   assert(encProps.inits.size() == 1 && "Expected single init encoding");
-  SmallVector<IREE::Encoding::EncodingProperties> &initProps = encProps.inits;
+  auto &initProps = encProps.inits[0];
   Value encodedInitOperand =
       setEncoding(rewriter, loc, linalgOp.getDpsInits()[0], initProps.encoding,
                   initProps.dynamicValues);
