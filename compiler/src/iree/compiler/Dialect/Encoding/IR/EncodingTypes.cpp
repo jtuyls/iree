@@ -10,7 +10,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -49,6 +51,64 @@ static Type getContractionInputTypeWithSignedness(OpBuilder &builder,
   return elemType;
 }
 
+/// Extract M, N, K dimension values for a contraction operation.
+/// Returns a vector of [M, N, K] values as index SSA values.
+static SmallVector<Value> getContractionDynamicDims(OpBuilder &builder,
+                                                    linalg::LinalgOp linalgOp) {
+  Location loc = linalgOp.getLoc();
+
+  // Infer contraction dimensions (M, N, K).
+  auto cDims = linalg::inferContractionDims(linalgOp);
+  if (failed(cDims)) {
+    return {};
+  }
+
+  // Get the output tensor to extract M and N from.
+  Value output = linalgOp.getDpsInits()[0];
+  AffineMap outputMap = linalgOp.getIndexingMapsArray().back();
+
+  // Helper to get dimension value from a tensor given a loop dimension.
+  auto getDimValue = [&](Value tensor, AffineMap map,
+                         unsigned loopDim) -> Value {
+    auto dimPos = map.getResultPosition(
+        getAffineDimExpr(loopDim, linalgOp->getContext()));
+    if (!dimPos) {
+      // This dimension is not present in this operand (e.g., matvec).
+      // Return a constant 1.
+      return arith::ConstantIndexOp::create(builder, loc, 1);
+    }
+    return tensor::DimOp::create(builder, loc, tensor, *dimPos);
+  };
+
+  // Get M dimension from output (first M dim, or 1 if empty).
+  Value mValue;
+  if (cDims->m.empty()) {
+    mValue = arith::ConstantIndexOp::create(builder, loc, 1);
+  } else {
+    mValue = getDimValue(output, outputMap, cDims->m[0]);
+  }
+
+  // Get N dimension from output (first N dim, or 1 if empty).
+  Value nValue;
+  if (cDims->n.empty()) {
+    nValue = arith::ConstantIndexOp::create(builder, loc, 1);
+  } else {
+    nValue = getDimValue(output, outputMap, cDims->n[0]);
+  }
+
+  // Get K dimension from LHS.
+  Value lhs = linalgOp.getDpsInputs()[0];
+  AffineMap lhsMap = linalgOp.getIndexingMapsArray()[0];
+  Value kValue;
+  if (cDims->k.empty()) {
+    kValue = arith::ConstantIndexOp::create(builder, loc, 1);
+  } else {
+    kValue = getDimValue(lhs, lhsMap, cDims->k[0]);
+  }
+
+  return {mValue, nValue, kValue};
+}
+
 FailureOr<OpEncodingProperties>
 SerializableAttr::getEncodingProperties(Operation *op) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
@@ -57,7 +117,7 @@ SerializableAttr::getEncodingProperties(Operation *op) {
   }
 
   MLIRContext *ctx = op->getContext();
-  OpBuilder builder(ctx);
+  OpBuilder builder(op);
 
   OpEncodingProperties props;
   SmallVector<Type> elemTypes;
@@ -65,11 +125,15 @@ SerializableAttr::getEncodingProperties(Operation *op) {
   SmallVector<int64_t> iterationSizes = linalgOp.getStaticLoopRanges();
   EncodingOpType opType;
 
+  // Extract M, N, K dynamic dimensions (shared by all contraction types).
+  SmallVector<Value> dynamicDims = getContractionDynamicDims(builder, linalgOp);
+
+  // Helper to create EncodingProperties for a given operand index.
   auto addEncoding = [&](int64_t operandIndex) {
     return EncodingProperties{EncodingAttr::get(ctx, operandIndex, opType,
                                                 elemTypes, maps,
                                                 iterationSizes),
-                              /*dynamicValues=*/{}};
+                              dynamicDims};
   };
 
   // Return encoding properties for contraction operations.
