@@ -89,6 +89,9 @@ struct OpEncodingProperties {
 struct PropagationEncoding {
   SmallVector<Attribute> operandEncodings;
   SmallVector<Attribute> resultEncodings;
+  /// Dynamic encoding dimension values (e.g., M, N, K for matmul) that should
+  /// be carried through during propagation.
+  SmallVector<Value> encodingDims;
 };
 
 struct PropagationResult {
