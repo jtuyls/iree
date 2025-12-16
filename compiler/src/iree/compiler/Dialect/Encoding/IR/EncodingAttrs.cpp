@@ -395,6 +395,14 @@ EncodingAttr::cloneWithNewOperandIndexingMap(AffineMap newIndexingMap) {
 
 bool EncodingAttr::isSerialized() const { return false; }
 
+std::optional<unsigned> EncodingAttr::getNumEncodingDims() const {
+  ArrayAttr iterationSizes = getIterationSizes();
+  if (!iterationSizes) {
+    return std::nullopt;
+  }
+  return iterationSizes.size();
+}
+
 Attribute EncodingAttr::cloneWithLayouts(ArrayRef<Attribute> layouts) const {
   MLIRContext *ctx = getContext();
   return LayoutAttr::get(ctx, ArrayAttr::get(ctx, layouts));
