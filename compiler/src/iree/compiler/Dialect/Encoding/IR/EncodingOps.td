@@ -8,15 +8,20 @@
 #define IREE_DIALECT_ENCODING_OPS
 
 include "iree/compiler/Dialect/Encoding/IR/EncodingBase.td"
+include "iree/compiler/Dialect/Encoding/IR/EncodingInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/IR/OpAsmInterface.td"
 
 //===----------------------------------------------------------------------===//
 // set_encoding op.
 //===----------------------------------------------------------------------===//
 
 def IREEEncoding_SetEncodingOp : IREEEncoding_PureOp<"set_encoding",[
-   DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface, ["reifyResultShapes"]>, Pure
+    DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface, ["reifyResultShapes"]>,
+    DeclareOpInterfaceMethods<IREEEncoding_EncodingDimReificationInterface,
+      ["reifyEncodingDim"]>,
+    Pure
   ]> {
   let summary = [{Perform pack and pad operation on source.}];
   let description = [{
@@ -88,6 +93,68 @@ def IREEEncoding_UnsetEncodingOp : IREEEncoding_PureOp<"unset_encoding", [
       return cast<RankedTensorType>(getResult().getType());
     }
   }];
+}
+
+//===----------------------------------------------------------------------===//
+// encoding_dim op.
+//===----------------------------------------------------------------------===//
+
+def IREEEncoding_EncodingDimOp : IREEEncoding_PureOp<"encoding_dim", [
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
+    Pure
+  ]> {
+  let summary = [{Query encoding dimension from an encoded tensor.}];
+  let description = [{
+    Returns the value of an encoding-specific dimension from a tensor with
+    encoding. Unlike `tensor.dim` which queries shape dimensions, this operation
+    queries the semantic dimensions captured in the encoding.
+
+    For matmul encodings, the encoding dimensions are M, N, K (in that order):
+    - index 0 returns M
+    - index 1 returns N
+    - index 2 returns K
+
+    For a matmul LHS tensor with shape `[M, K]`, `tensor.dim` can only query
+    M and K, but `encoding_dim` can query M, N, and K since all three are
+    captured in the encoding.
+
+    This operation is resolved by tracing the producer chain:
+    - From `set_encoding`: returns the corresponding `encoding_dims` value
+    - Through `tensor.cast` / DPS ops: forwards query to source
+
+    Example:
+
+    ```mlir
+    // Query the M dimension (index 0) of a matmul LHS encoding
+    %m = iree_encoding.encoding_dim %encoded[0] : tensor<?x?xf32, #encoding>
+
+    // Query the N dimension (index 1) - available even though not in LHS shape
+    %n = iree_encoding.encoding_dim %encoded[1] : tensor<?x?xf32, #encoding>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyRankedTensor:$source,
+    IndexAttr:$index
+  );
+  let results = (outs Index:$result);
+
+  let assemblyFormat = [{
+    attr-dict $source `[` $index `]` `:` type($source)
+  }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$source, "int64_t":$index)>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Helper function to get the index as a simple integer.
+    int64_t getConstantIndex() { return getIndex().getSExtValue(); }
+  }];
+
+  let hasVerifier = 1;
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
 }
 
 #endif  // IREE_DIALECT_ENCODING_OPS

@@ -113,6 +113,7 @@ def EncodingAttr :
       DeclareAttrInterfaceMethods<IREEEncoding_SerializableAttr, [
         "isSerialized",
         "cloneWithLayouts",
+        "getNumEncodingDims",
       ]>,
       DeclareAttrInterfaceMethods<IREEEncoding_ContractionEncodingAttrInterface, [
         "getReductionDims",
