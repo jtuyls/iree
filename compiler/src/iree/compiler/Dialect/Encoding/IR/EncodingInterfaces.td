@@ -193,6 +193,22 @@ def IREEEncoding_SerializableAttr :
         assert(false && "unimplemented interface method");
         return {};
       }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the number of encoding dimensions expected for this encoding.
+        This is used to validate `iree_encoding.encoding_dim` operations.
+        For example, a matmul encoding typically has 3 encoding dims (M, N, K).
+        Returns std::nullopt if the number of encoding dims cannot be determined
+        (e.g., for identity encodings or when the info is not available).
+      }],
+      /*retTy=*/"std::optional<unsigned>",
+      /*methodName=*/"getNumEncodingDims",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return std::nullopt;
+      }]
     >
   ];
 
@@ -457,6 +473,84 @@ def IREEEncoding_PropagationOpInterface :
         /*defaultImplementation=*/[{
           return failure();
       }]
+    >
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// Encoding Dim Reification Interface
+//===----------------------------------------------------------------------===//
+
+def IREEEncoding_EncodingDimReificationInterface :
+  OpInterface<"EncodingDimReificationInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Encoding";
+  let description = [{
+    Interface for operations that can provide encoding dimension values.
+
+    This interface enables reification of `iree_encoding.encoding_dim` operations
+    by tracing through producer chains to find where encoding dimension values
+    were originally captured.
+
+    Operations implement this interface in two ways:
+    1. **Source operations** (like `set_encoding`): Return the actual encoding
+       dimension value directly.
+    2. **Pass-through operations** (like `tensor.cast`, DPS ops): Return the
+       source value that should be queried instead, allowing the pattern to
+       create a new `encoding_dim` op on that source.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+        [{
+          Attempts to reify the encoding dimension at the given index for the
+          specified result.
+
+          For source operations (like `set_encoding`): Returns the encoding
+          dimension value directly if available at the given index.
+
+          For pass-through operations: Returns failure, indicating that the
+          pattern should use `getEncodingDimSource` to trace through to the
+          actual source.
+
+          Returns:
+          - Success with the value if the dimension can be resolved directly
+          - Failure if the operation cannot directly provide the value
+            (caller should use `getEncodingDimSource` to trace through)
+        }],
+        /*retTy=*/"::mlir::FailureOr<::mlir::Value>",
+        /*methodName=*/"reifyEncodingDim",
+        /*args=*/(ins
+          "::mlir::OpBuilder &":$builder,
+          "unsigned":$resultIndex,
+          "unsigned":$dimIndex
+        ),
+        /*methodBody=*/"",
+        /*defaultImplementation=*/[{
+          return failure();
+        }]
+    >,
+    InterfaceMethod<
+        [{
+          Returns the source value whose encoding dimensions should be queried
+          for the given result index.
+
+          This is used by pass-through operations (like `tensor.cast`, DPS ops)
+          that don't originate encoding dimensions but forward them from another
+          value.
+
+          Returns:
+          - The source value to trace through (for pass-through operations)
+          - Null value if this operation is not a pass-through for encoding dims
+        }],
+        /*retTy=*/"::mlir::Value",
+        /*methodName=*/"getEncodingDimSource",
+        /*args=*/(ins
+          "unsigned":$resultIndex
+        ),
+        /*methodBody=*/"",
+        /*defaultImplementation=*/[{
+          return {};
+        }]
     >
   ];
 }
