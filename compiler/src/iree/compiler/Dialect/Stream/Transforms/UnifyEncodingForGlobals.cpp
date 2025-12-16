@@ -553,6 +553,7 @@ static void updateTensorDispatchOp(TensorDispatchOp dispatchOp,
                                /*source_encoding_dims=*/encodingDims,
                                resultSize, TypeAttr::get(oldType),
                                /*result_encoding_dims=*/encodingDims, oldSize,
+                               /*encoding_dims=*/encodingDims,
                                dispatchOp.getAffinityAttr());
     rewriter.replaceAllUsesExcept(result, reencodeOp.getResult(), reencodeOp);
     LDBG() << "  Inserted re-encode op for result " << resultIdx << ": "
