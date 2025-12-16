@@ -6,13 +6,16 @@
 
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 
+#include "iree/compiler/Dialect/Encoding/IR/EncodingPatterns.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Support/LLVM.h"
@@ -64,6 +67,20 @@ LogicalResult SetEncodingOp::reifyResultShapes(
   return success();
 }
 
+FailureOr<Value> SetEncodingOp::reifyEncodingDim(OpBuilder &builder,
+                                                 unsigned resultIndex,
+                                                 unsigned dimIndex) {
+  // SetEncodingOp has a single result, so resultIndex must be 0.
+  if (resultIndex != 0)
+    return failure();
+
+  ValueRange encodingDims = getEncodingDims();
+  if (dimIndex >= encodingDims.size())
+    return failure();
+
+  return encodingDims[dimIndex];
+}
+
 //===----------------------------------------------------------------------===//
 // encoding.unset_encoding
 //===----------------------------------------------------------------------===//
@@ -112,6 +129,89 @@ LogicalResult UnsetEncodingOp::reifyResultShapes(
   reifiedReturnShapes[0] =
       getMixedValues(getResultType().getShape(), getResultDims(), builder);
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// encoding.dim
+//===----------------------------------------------------------------------===//
+
+LogicalResult DimOp::verify() {
+  auto sourceType = cast<RankedTensorType>(getSource().getType());
+  Attribute encoding = sourceType.getEncoding();
+
+  if (!encoding) {
+    return emitOpError("source tensor must have an encoding");
+  }
+
+  auto serializableAttr = dyn_cast<SerializableAttr>(encoding);
+  if (!serializableAttr) {
+    return emitOpError(
+        "source tensor encoding must implement SerializableAttr");
+  }
+
+  // Check that the index is valid if we can determine the number of dims.
+  std::optional<int64_t> numEncodingDims =
+      serializableAttr.getNumDynamicEncodingDims();
+  if (numEncodingDims) {
+    int64_t index = getConstantIndex();
+    if (index < 0 || index >= *numEncodingDims) {
+      return emitOpError("encoding dimension index ")
+             << index << " is out of bounds for encoding with "
+             << *numEncodingDims << " dimensions";
+    }
+  }
+
+  return success();
+}
+
+void DimOp::build(OpBuilder &builder, OperationState &result, Value source,
+                  int64_t index) {
+  build(builder, result, builder.getIndexType(), source,
+        builder.getIndexAttr(index));
+}
+
+void DimOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "enc_dim");
+}
+
+/// Fold dim when the source comes from set_encoding with known encoding_dims.
+OpFoldResult DimOp::fold(FoldAdaptor adaptor) {
+  int64_t index = getConstantIndex();
+
+  // Trace through the producer chain to find set_encoding.
+  Value source = getSource();
+  while (source) {
+    if (auto setEncoding = source.getDefiningOp<SetEncodingOp>()) {
+      ValueRange encodingDims = setEncoding.getEncodingDims();
+      if (index >= 0 && static_cast<size_t>(index) < encodingDims.size()) {
+        // Check if the encoding_dim is a constant.
+        if (auto constOp =
+                encodingDims[index].getDefiningOp<arith::ConstantIndexOp>()) {
+          return constOp.getValue();
+        }
+        // Not a constant, but we found the value - can't fold further.
+        return {};
+      }
+      return {};
+    }
+
+    // Forward through tensor.cast.
+    if (auto castOp = source.getDefiningOp<tensor::CastOp>()) {
+      source = castOp.getSource();
+      continue;
+    }
+
+    // No further producers to trace.
+    break;
+  }
+
+  return {};
+}
+
+void DimOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                        MLIRContext *context) {
+  populateEncodingDimReificationPatterns(results);
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding
