@@ -59,7 +59,8 @@ getInRowMajorLayout(OpBuilder &builder, SmallVector<TensorValue> tensorValues,
     builder.setInsertionPointAfterValue(v.value);
     Value rowMajorTensor = IREE::Flow::TensorEncodeOp::create(
         builder, v.value.getLoc(), rankedTensorType.dropEncoding(), v.value,
-        /*operand_dims=*/v.dynamicDims, /*result_dims=*/v.dynamicDims);
+        /*operand_dims=*/v.dynamicDims, /*result_dims=*/v.dynamicDims,
+        /*encoding_dims=*/ValueRange{});
     rowMajorTensors.push_back(rowMajorTensor);
     decodedIndices.push_back(idx);
   }
