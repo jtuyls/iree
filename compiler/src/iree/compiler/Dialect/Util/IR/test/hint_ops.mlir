@@ -18,6 +18,17 @@ util.func public @parse_print_barrier(%arg0 : tensor<i32>, %arg1 : tensor<f32>) 
 
 // -----
 
+// CHECK-LABEL: @parse_print_specialize
+// CHECK-SAME: %[[ARG0:[a-zA-Z0-9$._-]+]]
+util.func public @parse_print_specialize(%arg0 : index) {
+  // CHECK-NEXT: util.specialize %[[ARG0]] : index
+  %1 = util.specialize %arg0 : index
+
+  util.return
+}
+
+// -----
+
 // CHECK-LABEL: @parse_print_unfoldable_constant
 util.func public @parse_print_unfoldable_constant(%arg0 : tensor<i32>, %arg1 : tensor<i32>) {
   // CHECK-NEXT: util.unfoldable_constant 42

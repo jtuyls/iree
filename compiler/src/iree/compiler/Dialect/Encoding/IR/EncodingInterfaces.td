@@ -582,4 +582,97 @@ def IREEEncoding_EncodingDimReificationInterface :
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// Dynamic Layout Specialization Interface
+//===----------------------------------------------------------------------===//
+
+def IREEEncoding_DynamicLayoutSpecializerAttr :
+  AttrInterface<"DynamicLayoutSpecializerAttr"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Encoding";
+  let description = [{
+    Interface for encoding attributes that support dynamic layout specialization
+    based on runtime dimension values.
+
+    This interface enables runtime selection of optimal layouts based on problem
+    size. For example, a matmul encoding might use different tile sizes for small
+    vs large matrices.
+
+    The interface provides:
+    1. `getSpecializationInfo()` - Returns all specialization info at once
+    2. `getSpecializationDimensions()` - Returns which dims need specialization markers
+
+    Example usage:
+    ```
+    // An encoding that specializes based on M, N, K dimensions
+    // Small matrices (M,N,K < 256): use 8x8 tiles
+    // Large matrices: use 16x16 tiles
+    ```
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if this encoding supports dynamic layout specialization
+        based on encoding dimension values.
+
+        If true, the encoding can provide multiple specialized variants that
+        are selected at runtime based on the values of encoding dimensions
+        (typically M, N, K for matmul operations).
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"supportsSpecialization",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return false;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns all specialization information in a single call.
+
+        This returns a SpecializationInfo struct containing:
+        - variants: Array of (encoding, ranges) pairs for each variant
+        - fallbackEncoding: The encoding to use when no variant matches
+        - numEncodingDims: Number of encoding dimensions to specialize on
+
+        Returns std::nullopt if specialization is not supported.
+      }],
+      /*retTy=*/"std::optional<::mlir::iree_compiler::IREE::Encoding::SpecializationInfo>",
+      /*methodName=*/"getSpecializationInfo",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return std::nullopt;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the encoding dimension indices that need specialization markers.
+
+        This is used by the marker insertion pass to insert util.specialize
+        ops for each dimension that needs runtime specialization. The actual
+        specialization ranges should be retrieved via getSpecializationInfo().
+
+        Returns an empty vector if specialization is not supported.
+      }],
+      /*retTy=*/"::llvm::SmallVector<unsigned>",
+      /*methodName=*/"getSpecializationDimensions",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return {};
+      }]
+    >
+  ];
+
+  let extraClassDeclaration = [{
+    /// Struct representing a single specialization variant.
+    struct SpecializationVariant {
+      Attribute encoding;                              // Encoding for this variant
+      IREE::Util::IntAssumptionArrayAttr ranges;       // Per-dim ranges for this variant
+    };
+  }];
+}
+
 #endif // IREE_DIALECT_ENCODING_INTERFACES

@@ -8,6 +8,7 @@
 #define IREE_COMPILER_DIALECT_ENCODING_IR_ENCODINGTYPES_H_
 
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
+#include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -106,6 +107,25 @@ struct PropagationResult {
   // The new results created after propagating an encoding through an operation.
   // It is returned to the caller for further transformation or replacement.
   SmallVector<Value> replacements;
+};
+
+/// A single specialization variant for dynamic layout selection.
+struct SpecializationVariant {
+  /// The encoding to use for this variant.
+  Attribute encoding;
+  /// Per-dimension ranges that must be satisfied to select this variant.
+  IREE::Util::IntAssumptionArrayAttr ranges;
+};
+
+/// Complete specialization information for an encoding.
+/// Returned by DynamicLayoutSpecializerAttr::getSpecializationInfo().
+struct SpecializationInfo {
+  /// List of specialization variants, ordered by priority.
+  SmallVector<SpecializationVariant> variants;
+  /// Encoding to use when no variant matches.
+  Attribute fallbackEncoding;
+  /// Number of encoding dimensions to specialize on.
+  unsigned numEncodingDims;
 };
 
 } // namespace mlir::iree_compiler::IREE::Encoding

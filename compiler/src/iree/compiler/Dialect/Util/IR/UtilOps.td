@@ -512,6 +512,47 @@ def Util_AssumeIntOp : Util_PureOp<"assume.int", [
   let hasVerifier = 1;
 }
 
+def Util_SpecializeOp : Util_PureOp<"specialize", [
+    AllTypesMatch<["operand", "result"]>
+]> {
+  let summary = [{Marks a value for specialization.}];
+  let description = [{
+    This op marks a value (typically an index representing a dimension) for
+    specialization. It is used to capture specialization intent at an early
+    stage in the pipeline (e.g., at `flow.dispatch.region` level) and carry it
+    through transformations until `SpecializeExports` can act on it.
+
+    The actual specialization ranges are stored in the encoding attributes
+    (e.g., `SpecializableLayoutAttr`) on tensors in the function. This op
+    simply marks which value should be used for specialization condition
+    generation, allowing `SpecializeExports` to find the workload ordinal
+    for condition generation.
+
+    Example:
+    ```mlir
+    %dim = iree_encoding.encoding_dim %tensor[0] : tensor<?x?xf32, #enc>
+    %specialized = util.specialize %dim : index
+    ```
+
+    This indicates that dispatches should be specialized based on the value
+    of this dimension, with the actual ranges coming from the encoding
+    attributes on tensors.
+
+    The op passes through the value unchanged but marks it for specialization.
+  }];
+
+  let arguments = (ins
+    AnySignlessIntegerOrIndex:$operand
+  );
+  let results = (outs
+    AnySignlessIntegerOrIndex:$result
+  );
+
+  let assemblyFormat = [{
+    $operand attr-dict `:` type($operand)
+  }];
+}
+
 def Util_OptimizationBarrierOp : Util_Op<"optimization_barrier", [
   AllTypesMatch<["operands", "results"]>,
 ]> {

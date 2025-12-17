@@ -9,6 +9,7 @@
 #include "iree/compiler/Dialect/Encoding/IR/EncodingDialect.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -25,6 +26,17 @@
 #include <cassert>
 
 #define DEBUG_TYPE "iree-encoding-attrs"
+
+// Flag to enable dynamic layout specialization for EncodingAttr.
+// When enabled, encodings can provide multiple specialized variants that
+// are selected at runtime based on encoding dimension values.
+llvm::cl::opt<bool> clEnableDynamicEncodingSpecialization(
+    "iree-encoding-enable-dynamic-specialization",
+    llvm::cl::desc(
+        "Enable dynamic layout specialization for encoding "
+        "attributes. When enabled, encodings can provide multiple "
+        "layout variants selected at runtime based on problem size."),
+    llvm::cl::init(false));
 
 namespace mlir::iree_compiler::IREE::Encoding {
 
@@ -471,6 +483,66 @@ std::optional<SmallVector<int32_t>> EncodingAttr::getReductionDims() const {
   return result;
 }
 
+// DynamicLayoutSpecializerAttr interface implementation for EncodingAttr.
+// This enables runtime layout selection based on encoding dimension values.
+// The implementation is controlled by the clEnableDynamicEncodingSpecialization
+// flag defined at the top of this file.
+
+bool EncodingAttr::supportsSpecialization() const {
+  // Only support specialization if the flag is enabled and we have valid
+  // iteration sizes (which tells us the encoding dimensions to specialize on).
+  if (!::clEnableDynamicEncodingSpecialization) {
+    return false;
+  }
+  std::optional<unsigned> numDims = getNumEncodingDims();
+  return numDims.has_value() && numDims.value() > 0;
+}
+
+std::optional<SpecializationInfo> EncodingAttr::getSpecializationInfo() const {
+  if (!supportsSpecialization()) {
+    return std::nullopt;
+  }
+
+  std::optional<unsigned> numDims = getNumEncodingDims();
+  if (!numDims) {
+    return std::nullopt;
+  }
+
+  SpecializationInfo info;
+  info.numEncodingDims = numDims.value();
+
+  // For now, just return a fallback encoding with no specialized variants.
+  // This allows e2e testing to verify the basic flow works before adding
+  // specialized ranges.
+  // The fallback encoding is the current EncodingAttr itself, which will be
+  // resolved to a layout suitable for any size.
+  info.fallbackEncoding = *this;
+
+  // No variants - all inputs will use the fallback path.
+  // TODO: Add specialized variants for different size ranges (e.g., small vs
+  // large matrices) once the basic flow is verified.
+
+  return info;
+}
+
+SmallVector<unsigned> EncodingAttr::getSpecializationDimensions() const {
+  if (!supportsSpecialization()) {
+    return {};
+  }
+
+  std::optional<unsigned> numDims = getNumEncodingDims();
+  if (!numDims) {
+    return {};
+  }
+
+  // Return all encoding dimension indices for specialization.
+  SmallVector<unsigned> result;
+  for (unsigned i = 0; i < numDims.value(); ++i) {
+    result.push_back(i);
+  }
+  return result;
+}
+
 //===---------------------------------------------------------------------===//
 // iree_encoding.padding
 //===---------------------------------------------------------------------===//
@@ -691,6 +763,155 @@ Attribute SpecializationResolverAttr::getUnifiedEncoding(
     ArrayRef<Attribute> encodings) const {
   MLIRContext *ctx = getContext();
   return SpecializedAttr::get(ctx, getSeed(), /*type=*/nullptr);
+}
+
+//===---------------------------------------------------------------------===//
+// SpecializableLayoutAttr
+//===---------------------------------------------------------------------===//
+
+bool SpecializableLayoutAttr::isSerialized() const {
+  // The SpecializableLayoutAttr is considered serialized if the fallback
+  // layout is serialized. This allows later lowering phases to proceed
+  // using the fallback layout for size calculations while the actual layout
+  // selection happens at runtime.
+  if (auto serializableLayout =
+          dyn_cast<SerializableAttr>(getFallbackLayout())) {
+    return serializableLayout.isSerialized();
+  }
+  return false;
+}
+
+std::optional<unsigned> SpecializableLayoutAttr::getNumEncodingDims() const {
+  return getNumDims();
+}
+
+LogicalResult SpecializableLayoutAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, unsigned numDims,
+    ArrayAttr specializationRanges, ArrayAttr variantLayouts,
+    Attribute fallbackLayout) {
+  if (specializationRanges.size() != variantLayouts.size()) {
+    return emitError() << "specialization_ranges and variant_layouts must have "
+                          "the same size";
+  }
+  return success();
+}
+
+Value SpecializableLayoutAttr::calculateStorageSizeInBytes(
+    Location loc, OpBuilder &builder, RankedTensorType type,
+    ValueRange dynamicDims) const {
+  // Compute the maximum storage size across all variant layouts and fallback.
+  // This ensures we allocate enough space for any runtime-selected layout.
+  SmallVector<Value> sizes;
+
+  // Get size from fallback layout
+  if (auto serializableLayout =
+          dyn_cast<SerializableAttr>(getFallbackLayout())) {
+    if (Value fallbackSize = serializableLayout.calculateStorageSizeInBytes(
+            loc, builder, type, dynamicDims)) {
+      sizes.push_back(fallbackSize);
+    }
+  }
+
+  // Get sizes from all variant layouts
+  for (Attribute variantLayout : getVariantLayouts()) {
+    // Each element in variant_layouts is an array of layouts for that variant
+    if (auto layoutArray = dyn_cast<ArrayAttr>(variantLayout)) {
+      for (Attribute layout : layoutArray) {
+        if (auto serializableLayout = dyn_cast<SerializableAttr>(layout)) {
+          if (Value variantSize =
+                  serializableLayout.calculateStorageSizeInBytes(
+                      loc, builder, type, dynamicDims)) {
+            sizes.push_back(variantSize);
+          }
+        }
+      }
+    }
+  }
+
+  if (sizes.empty()) {
+    return {};
+  }
+
+  // Return the maximum of all sizes
+  Value maxSize = sizes[0];
+  for (size_t i = 1; i < sizes.size(); ++i) {
+    maxSize = arith::MaxUIOp::create(builder, loc, maxSize, sizes[i]);
+  }
+  return maxSize;
+}
+
+//===---------------------------------------------------------------------===//
+// DynamicLayoutTestAttr - for testing dynamic layout specialization
+//===---------------------------------------------------------------------===//
+
+bool DynamicLayoutTestAttr::isSerialized() const { return false; }
+
+std::optional<unsigned> DynamicLayoutTestAttr::getNumEncodingDims() const {
+  return getNumDims();
+}
+
+Attribute
+DynamicLayoutTestAttr::cloneWithLayouts(ArrayRef<Attribute> layouts) const {
+  MLIRContext *ctx = getContext();
+  return LayoutAttr::get(ctx, ArrayAttr::get(ctx, layouts));
+}
+
+bool DynamicLayoutTestAttr::supportsSpecialization() const {
+  return getVariants() && !getVariants().empty();
+}
+
+std::optional<SpecializationInfo>
+DynamicLayoutTestAttr::getSpecializationInfo() const {
+  if (!supportsSpecialization()) {
+    return std::nullopt;
+  }
+
+  SpecializationInfo info;
+  info.numEncodingDims = getNumDims();
+  info.fallbackEncoding =
+      SpecializedAttr::get(getContext(), getFallback(), TypeAttr());
+
+  for (Attribute variantAttr : getVariants()) {
+    auto variantArray = dyn_cast<ArrayAttr>(variantAttr);
+    if (!variantArray || variantArray.size() < 2) {
+      continue;
+    }
+
+    SpecializationVariant variant;
+    // Get the ranges (first element)
+    if (auto rangesAttr =
+            dyn_cast<IREE::Util::IntAssumptionArrayAttr>(variantArray[0])) {
+      variant.ranges = rangesAttr;
+    } else {
+      continue;
+    }
+
+    // Get the seed and create specialized encoding (second element)
+    auto seedAttr = dyn_cast<IntegerAttr>(variantArray[1]);
+    if (!seedAttr) {
+      continue;
+    }
+    variant.encoding =
+        SpecializedAttr::get(getContext(), seedAttr.getInt(), TypeAttr());
+
+    info.variants.push_back(variant);
+  }
+
+  return info;
+}
+
+SmallVector<unsigned>
+DynamicLayoutTestAttr::getSpecializationDimensions() const {
+  if (!supportsSpecialization()) {
+    return {};
+  }
+
+  unsigned numDims = getNumDims();
+  SmallVector<unsigned> result;
+  for (unsigned dimIdx = 0; dimIdx < numDims; ++dimIdx) {
+    result.push_back(dimIdx);
+  }
+  return result;
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding

@@ -38,6 +38,7 @@ iree_cc_library(
     "FusionUtils.cpp"
     "HoistEncodingOps.cpp"
     "HoistUniformScalarCompute.cpp"
+    "InsertEncodingSpecializationMarkers.cpp"
     "InsertTensorBarriers.cpp"
     "MaterializeDefaultWorkgroupCountRegion.cpp"
     "Passes.cpp"

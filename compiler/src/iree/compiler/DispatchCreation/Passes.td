@@ -453,6 +453,30 @@ def ConvertEncodingToFlowPass :
 // Dispatch region to workgroups passes
 //===---------------------------------------------------------------------===//
 
+def InsertEncodingSpecializationMarkersPass :
+    InterfacePass<"iree-dispatch-creation-insert-encoding-specialization-markers", "mlir::FunctionOpInterface"> {
+  let summary = "Insert specialization markers for dynamic layout encodings.";
+  let description = [{
+    Walks dispatch regions looking for tensors with encodings that implement
+    DynamicLayoutSpecializerAttr. For such encodings, inserts:
+    1. iree_encoding.encoding_dim ops to query encoding dimension values
+    2. util.specialize marker ops with the specialization ranges
+
+    These markers are later consumed by SpecializeExports to create specialized
+    export variants based on runtime dimension values.
+
+    This pass should run after dispatch regions are formed but before they are
+    converted to workgroups, so that encoding_dim values can flow through as
+    workload ordinals.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "IREE::Encoding::IREEEncodingDialect",
+    "IREE::Flow::FlowDialect",
+    "IREE::Util::UtilDialect",
+  ];
+}
+
 def ConvertDispatchRegionsToWorkgroupsPass :
     InterfacePass<"iree-dispatch-creation-convert-dispatch-regions-to-workgroups", "mlir::FunctionOpInterface"> {
   let summary = "Convert dispatch regions to dispatch workgroups.";

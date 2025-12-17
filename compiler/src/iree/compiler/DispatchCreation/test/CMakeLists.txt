@@ -42,6 +42,7 @@ iree_lit_test_suite(
     "fusion_preprocessing.mlir"
     "hoist_encoding_ops.mlir"
     "hoist_uniform_scalar_compute.mlir"
+    "insert_encoding_specialization_markers.mlir"
     "insert_tensor_barriers.mlir"
     "materialize_default_workgroup_count_region.mlir"
     "pad_fusion_with_consumer.mlir"

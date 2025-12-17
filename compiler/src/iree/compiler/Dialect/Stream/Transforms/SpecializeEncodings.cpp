@@ -77,6 +77,29 @@ static bool isRecognizedEncodingType(Type type) {
   return isa<IREE::Encoding::SerializableAttr>(encoding);
 }
 
+/// Resolves a layout for a given encoding using the layout resolvers.
+static Attribute
+resolveLayoutForEncoding(RankedTensorType type, Attribute encoding,
+                         const SetVector<Attribute> &layoutResolvers) {
+  auto typeWithEncoding = type.cloneWithEncoding(encoding);
+  SmallVector<Attribute> layouts;
+  for (auto attr : layoutResolvers) {
+    auto encodingLayoutAttr = cast<IREE::Encoding::LayoutResolverAttr>(attr);
+    Attribute layout = encodingLayoutAttr.getLayout(typeWithEncoding);
+    if (!layout) {
+      return nullptr;
+    }
+    layouts.push_back(layout);
+  }
+  // If there's only one layout, return it directly; otherwise wrap in
+  // LayoutAttr
+  if (layouts.size() == 1) {
+    return layouts[0];
+  }
+  return IREE::Encoding::LayoutAttr::get(
+      type.getContext(), ArrayAttr::get(type.getContext(), layouts));
+}
+
 /// Returns the type with updated encoding, if any. Returns the original type if
 /// the the encoding type is not recognized or it is already serialized. If it
 /// fails to resolve the layout, returns nullptr.
@@ -103,6 +126,50 @@ static Type getTypeWithResolvedEncodingLayouts(
                     llvm::IsaPred<IREE::Encoding::LayoutResolverAttr>)) {
     return rankedTensorType.dropEncoding();
   }
+
+  // Check if the encoding supports dynamic layout specialization
+  if (auto specializerAttr =
+          dyn_cast<IREE::Encoding::DynamicLayoutSpecializerAttr>(
+              rankedTensorType.getEncoding())) {
+    if (auto specInfo = specializerAttr.getSpecializationInfo()) {
+      LLVM_DEBUG(llvm::dbgs() << "Found DynamicLayoutSpecializerAttr with "
+                              << specInfo->variants.size() << " variants\n");
+
+      SmallVector<Attribute> variantRanges;
+      SmallVector<Attribute> variantLayouts;
+
+      // Resolve layouts for each variant
+      for (const auto &variant : specInfo->variants) {
+        variantRanges.push_back(variant.ranges);
+
+        // Resolve layout for this variant's encoding
+        Attribute layout = resolveLayoutForEncoding(
+            rankedTensorType, variant.encoding, layoutResolvers);
+        if (!layout) {
+          LLVM_DEBUG(llvm::dbgs() << "Failed to resolve layout for variant\n");
+          return nullptr;
+        }
+        variantLayouts.push_back(layout);
+      }
+
+      // Resolve fallback layout
+      Attribute fallbackLayout = resolveLayoutForEncoding(
+          rankedTensorType, specInfo->fallbackEncoding, layoutResolvers);
+      if (!fallbackLayout) {
+        LLVM_DEBUG(llvm::dbgs() << "Failed to resolve fallback layout\n");
+        return nullptr;
+      }
+
+      // Create SpecializableLayoutAttr
+      MLIRContext *ctx = rankedTensorType.getContext();
+      auto newEncoding = IREE::Encoding::SpecializableLayoutAttr::get(
+          ctx, specInfo->numEncodingDims, ArrayAttr::get(ctx, variantRanges),
+          ArrayAttr::get(ctx, variantLayouts), fallbackLayout);
+      return rankedTensorType.cloneWithEncoding(newEncoding);
+    }
+  }
+
+  // Standard path: resolve layouts directly
   SmallVector<Attribute> layouts;
   for (auto attr : layoutResolvers) {
     auto encodingLayoutAttr = cast<IREE::Encoding::LayoutResolverAttr>(attr);

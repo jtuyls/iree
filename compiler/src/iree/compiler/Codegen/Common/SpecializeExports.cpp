@@ -8,8 +8,10 @@
 #include <numeric>
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "llvm/ADT/SlowDynamicAPInt.h"
@@ -122,12 +124,79 @@ getAndInsertNextAvailableOrdinal(llvm::SmallDenseSet<int64_t> &ordinals,
   return newOrdinal;
 }
 
+/// Helper to get the appropriate layout from SpecializableLayoutAttr based on
+/// variant index. If variantIndex is -1 or out of bounds, uses the fallback.
+static Attribute
+getLayoutForVariant(IREE::Encoding::SpecializableLayoutAttr specializableAttr,
+                    int variantIndex) {
+  if (variantIndex >= 0 && static_cast<size_t>(variantIndex) <
+                               specializableAttr.getVariantLayouts().size()) {
+    return specializableAttr.getVariantLayouts()[variantIndex];
+  }
+  return specializableAttr.getFallbackLayout();
+}
+
+/// Replaces SpecializableLayoutAttr encodings in |func| with the specific
+/// variant layout at index |variantIndex|. If |variantIndex| is -1, uses the
+/// fallback layout. Handles both DispatchTensorType and RankedTensorType.
+static void replaceSpecializableLayoutsInFunction(func::FuncOp func,
+                                                  int variantIndex) {
+  // Walk all ops and replace SpecializableLayoutAttr encodings
+  func.walk([&](Operation *op) {
+    for (auto result : op->getResults()) {
+      Type resultType = result.getType();
+
+      // Handle DispatchTensorType
+      if (auto dispatchType =
+              dyn_cast<IREE::TensorExt::DispatchTensorType>(resultType)) {
+        auto tensorType =
+            dyn_cast<RankedTensorType>(dispatchType.getBoundType());
+        if (!tensorType || !tensorType.getEncoding()) {
+          continue;
+        }
+        auto specializableAttr =
+            dyn_cast<IREE::Encoding::SpecializableLayoutAttr>(
+                tensorType.getEncoding());
+        if (!specializableAttr) {
+          continue;
+        }
+
+        Attribute newLayout =
+            getLayoutForVariant(specializableAttr, variantIndex);
+        auto newTensorType = tensorType.cloneWithEncoding(newLayout);
+        auto newDispatchType = IREE::TensorExt::DispatchTensorType::get(
+            dispatchType.getAccess(), newTensorType);
+        result.setType(newDispatchType);
+        continue;
+      }
+
+      // Handle regular RankedTensorType
+      if (auto tensorType = dyn_cast<RankedTensorType>(resultType)) {
+        if (!tensorType.getEncoding()) {
+          continue;
+        }
+        auto specializableAttr =
+            dyn_cast<IREE::Encoding::SpecializableLayoutAttr>(
+                tensorType.getEncoding());
+        if (!specializableAttr) {
+          continue;
+        }
+
+        Attribute newLayout =
+            getLayoutForVariant(specializableAttr, variantIndex);
+        auto newTensorType = tensorType.cloneWithEncoding(newLayout);
+        result.setType(newTensorType);
+      }
+    }
+  });
+}
+
 /// Specializes the function |func| exported by |exportOp| based on
-/// |specializationRoot|. The ranges of the iteration space of the tilable
-/// root to specialize for is specified by |specializationRanges|.
-static void specializeExportedFunction(
+/// |workloadMapping| and |specializationRanges|. The workload mapping
+/// associates iteration dimensions with workload ordinals.
+static void specializeExportedFunctionWithWorkload(
     IREE::HAL::ExecutableExportOp exportOp, func::FuncOp func,
-    TilingInterface specializationRoot,
+    ArrayRef<AssumedWorkloadSize> workloadMapping,
     IREE::Util::MultiIntAssumptionArrayAttr specializationRanges,
     llvm::SmallDenseSet<int64_t> &ordinals) {
   if (specializationRanges.empty()) {
@@ -143,13 +212,6 @@ static void specializeExportedFunction(
     return;
   }
 
-  FailureOr<SmallVector<AssumedWorkloadSize>> maybeWorkloadMapping =
-      getIterationDomainAsWorkload(specializationRoot);
-  if (failed(maybeWorkloadMapping)) {
-    LLVM_DEBUG(llvm::dbgs() << "Empty specialization ranges.");
-    return;
-  }
-
   SymbolTable innerModule = SymbolTable::getNearestSymbolTable(func);
   SymbolTable symbolTable(innerModule);
 
@@ -157,8 +219,7 @@ static void specializeExportedFunction(
   func::FuncOp currentFunction = func;
   OpBuilder builder(exportOp);
   Location loc = exportOp.getLoc();
-
-  ArrayRef<AssumedWorkloadSize> workloadMapping = maybeWorkloadMapping.value();
+  int variantIndex = 0;
   for (auto specializationRange : specializationRanges) {
     [[maybe_unused]] bool requiresSpecialization = false;
     bool neverApplies = false;
@@ -365,12 +426,43 @@ static void specializeExportedFunction(
 
       IREE::HAL::ReturnOp::create(builder, loc, exportCondition);
     }
+
+    // Replace SpecializableLayoutAttr in the cloned function with the
+    // appropriate variant layout. The clonedFunction now has the original name
+    // and represents this variant.
+    replaceSpecializableLayoutsInFunction(clonedFunction, variantIndex);
+
     // Current function is still the original function, just with a new symbol
     // name.
     currentExport = newExport;
+    ++variantIndex;
   }
 
+  // The final currentFunction is the fallback - replace with fallback layout
+  replaceSpecializableLayoutsInFunction(currentFunction, -1);
+
   return;
+}
+
+/// Specializes the function |func| exported by |exportOp| based on
+/// |specializationRoot|. The ranges of the iteration space of the tilable
+/// root to specialize for is specified by |specializationRanges|.
+/// This is a wrapper that computes the workload mapping from the
+/// TilingInterface.
+static void specializeExportedFunction(
+    IREE::HAL::ExecutableExportOp exportOp, func::FuncOp func,
+    TilingInterface specializationRoot,
+    IREE::Util::MultiIntAssumptionArrayAttr specializationRanges,
+    llvm::SmallDenseSet<int64_t> &ordinals) {
+  FailureOr<SmallVector<AssumedWorkloadSize>> maybeWorkloadMapping =
+      getIterationDomainAsWorkload(specializationRoot);
+  if (failed(maybeWorkloadMapping)) {
+    LLVM_DEBUG(llvm::dbgs() << "Failed to get workload mapping.");
+    return;
+  }
+  specializeExportedFunctionWithWorkload(exportOp, func,
+                                         maybeWorkloadMapping.value(),
+                                         specializationRanges, ordinals);
 }
 
 /// Walks the function |func| exported by |exportOp| and looks for a tilable
@@ -410,6 +502,225 @@ static void specializeExportedFunctionByRangeAttribute(
 
   specializeExportedFunction(exportOp, func, specializationRoot,
                              specializationRanges, ordinals);
+}
+
+/// Collects workload information from util.specialize ops.
+/// Returns the workload mapping from all specialize ops in the function.
+static FailureOr<SmallVector<AssumedWorkloadSize>> getWorkloadFromSpecializeOps(
+    func::FuncOp func, SmallVector<IREE::Util::SpecializeOp> &specializeOps) {
+  SmallVector<AssumedWorkloadSize> workloadAssumptions;
+
+  for (auto specializeOp : specializeOps) {
+    Value operand = specializeOp.getOperand();
+
+    // Trace back to the workload ordinal
+    auto workloadOrdinal =
+        operand.getDefiningOp<IREE::TensorExt::DispatchWorkloadOrdinalOp>();
+    if (!workloadOrdinal) {
+      // Try walking through assume.int ops
+      if (auto assumeOp = operand.getDefiningOp<IREE::Util::AssumeIntOp>()) {
+        // The assume op may have multiple results, find which one matches
+        for (auto [idx, result] : llvm::enumerate(assumeOp.getResults())) {
+          if (result == operand) {
+            Value assumeOperand = assumeOp.getOperand(idx);
+            workloadOrdinal = assumeOperand.getDefiningOp<
+                IREE::TensorExt::DispatchWorkloadOrdinalOp>();
+            break;
+          }
+        }
+      }
+    }
+
+    if (!workloadOrdinal) {
+      LLVM_DEBUG({
+        llvm::dbgs() << "Could not find workload ordinal for specialize op\n\t";
+        llvm::dbgs() << specializeOp << "\n";
+      });
+      return failure();
+    }
+
+    AssumedWorkloadSize assumption;
+    assumption.workloadOrdinal = workloadOrdinal.getOrdinal().getZExtValue();
+
+    if (auto assumeOp = operand.getDefiningOp<IREE::Util::AssumeIntOp>()) {
+      assumption.assumptionOrOrdinal = cast<OpResult>(operand);
+    } else {
+      assumption.assumptionOrOrdinal = workloadOrdinal->getOpResult(0);
+    }
+
+    workloadAssumptions.push_back(assumption);
+  }
+
+  return workloadAssumptions;
+}
+
+/// Builds specialization ranges from SpecializableLayoutAttr.
+/// The ranges are extracted from the attribute's specialization_ranges field.
+static IREE::Util::MultiIntAssumptionArrayAttr
+buildSpecializationRangesFromLayoutAttr(
+    MLIRContext *ctx, IREE::Encoding::SpecializableLayoutAttr layoutAttr) {
+  if (!layoutAttr) {
+    return {};
+  }
+
+  ArrayAttr rangesAttr = layoutAttr.getSpecializationRanges();
+  if (rangesAttr.empty()) {
+    return {};
+  }
+
+  // The specialization_ranges in SpecializableLayoutAttr is already in the
+  // format we need: an array of IntAssumptionArrayAttr, where each entry
+  // represents a variant's ranges across all dimensions.
+  SmallVector<IREE::Util::IntAssumptionArrayAttr> rowAttrs;
+  for (Attribute attr : rangesAttr) {
+    if (auto rangeArray = dyn_cast<IREE::Util::IntAssumptionArrayAttr>(attr)) {
+      rowAttrs.push_back(rangeArray);
+    }
+  }
+
+  return IREE::Util::MultiIntAssumptionArrayAttr::get(ctx, rowAttrs);
+}
+
+/// Collects SpecializableLayoutAttr encodings from ops producing
+/// DispatchTensorType in |func|. Returns the first one found, or nullptr if
+/// none.
+static IREE::Encoding::SpecializableLayoutAttr
+findSpecializableLayoutInFunction(func::FuncOp func) {
+  IREE::Encoding::SpecializableLayoutAttr result;
+  func.walk([&](Operation *op) {
+    for (auto opResult : op->getResults()) {
+      auto dispatchType =
+          dyn_cast<IREE::TensorExt::DispatchTensorType>(opResult.getType());
+      if (!dispatchType) {
+        continue;
+      }
+      auto tensorType = dyn_cast<RankedTensorType>(dispatchType.getBoundType());
+      if (!tensorType || !tensorType.getEncoding()) {
+        continue;
+      }
+      if (auto attr = dyn_cast<IREE::Encoding::SpecializableLayoutAttr>(
+              tensorType.getEncoding())) {
+        result = attr;
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+  return result;
+}
+
+/// Specializes exports based on SpecializableLayoutAttr encodings found in
+/// binding subspans. Creates specialized export variants for each layout
+/// variant in the attribute.
+static void specializeExportedFunctionBySpecializableLayout(
+    IREE::HAL::ExecutableExportOp exportOp, func::FuncOp func,
+    llvm::SmallDenseSet<int64_t> &ordinals) {
+  auto specializableAttr = findSpecializableLayoutInFunction(func);
+  if (!specializableAttr) {
+    return;
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "Found SpecializableLayoutAttr in function: "
+                          << func.getName() << "\n");
+
+  ArrayAttr variantLayouts = specializableAttr.getVariantLayouts();
+  ArrayAttr specializationRanges = specializableAttr.getSpecializationRanges();
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "  num variants: " << variantLayouts.size() << "\n";
+    llvm::dbgs() << "  num ranges: " << specializationRanges.size() << "\n";
+  });
+
+  if (variantLayouts.empty()) {
+    // No variants, just use fallback
+    replaceSpecializableLayoutsInFunction(func, -1);
+    return;
+  }
+
+  // Bail out if the export already has a fallback, or if there is no workgroup
+  // count body.
+  if (!exportOp.getWorkgroupCountBody() || exportOp.getConditionFallback()) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "Missing workgroup count body or already has fallback for "
+                  "specializable layout.\n");
+    // Just use fallback layout
+    replaceSpecializableLayoutsInFunction(func, -1);
+    return;
+  }
+
+  // For the initial implementation, just replace with fallback layout
+  // TODO: Implement full specialization with condition generation
+  LLVM_DEBUG(llvm::dbgs() << "Replacing with fallback layout for now.\n");
+  replaceSpecializableLayoutsInFunction(func, -1);
+}
+
+/// Walks the function |func| exported by |exportOp| and looks for
+/// util.specialize ops that mark values for specialization.
+/// The specialization ranges are obtained from SpecializableLayoutAttr.
+static void specializeExportedFunctionBySpecializeOps(
+    IREE::HAL::ExecutableExportOp exportOp, func::FuncOp func,
+    llvm::SmallDenseSet<int64_t> &ordinals) {
+  // Collect all util.specialize ops
+  SmallVector<IREE::Util::SpecializeOp> specializeOps;
+  func.walk([&](IREE::Util::SpecializeOp op) { specializeOps.push_back(op); });
+
+  if (specializeOps.empty()) {
+    return;
+  }
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "Found " << specializeOps.size()
+                 << " util.specialize ops in function\n";
+  });
+
+  // Find SpecializableLayoutAttr to get the specialization ranges
+  auto specializableAttr = findSpecializableLayoutInFunction(func);
+  if (!specializableAttr) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "No SpecializableLayoutAttr found for specialize ops\n");
+    // Remove the specialize ops since we can't use them
+    for (auto op : specializeOps) {
+      op.getResult().replaceAllUsesWith(op.getOperand());
+      op.erase();
+    }
+    return;
+  }
+
+  // Get workload mapping from the specialize ops
+  FailureOr<SmallVector<AssumedWorkloadSize>> maybeWorkloadMapping =
+      getWorkloadFromSpecializeOps(func, specializeOps);
+  if (failed(maybeWorkloadMapping)) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "Failed to get workload mapping from specialize ops\n");
+    return;
+  }
+
+  // Build the specialization ranges from the SpecializableLayoutAttr
+  MLIRContext *ctx = func.getContext();
+  IREE::Util::MultiIntAssumptionArrayAttr specializationRanges =
+      buildSpecializationRangesFromLayoutAttr(ctx, specializableAttr);
+
+  if (!specializationRanges || specializationRanges.empty()) {
+    LLVM_DEBUG(llvm::dbgs() << "No specialization ranges in layout attr\n");
+    // Remove the specialize ops and just use fallback
+    for (auto op : specializeOps) {
+      op.getResult().replaceAllUsesWith(op.getOperand());
+      op.erase();
+    }
+    replaceSpecializableLayoutsInFunction(func, -1);
+    return;
+  }
+
+  // Remove the specialize ops before cloning (they'll be cloned otherwise)
+  for (auto op : specializeOps) {
+    op.getResult().replaceAllUsesWith(op.getOperand());
+    op.erase();
+  }
+
+  // Call the workload-based specialization function directly
+  specializeExportedFunctionWithWorkload(exportOp, func,
+                                         maybeWorkloadMapping.value(),
+                                         specializationRanges, ordinals);
 }
 
 namespace {
@@ -459,8 +770,18 @@ public:
         llvm::dbgs() << "Specializing export:\n\t";
         llvm::dbgs() << exportOp << "\n";
       });
+
+      // First try attribute-based specialization (existing flow)
       specializeExportedFunctionByRangeAttribute(exportOp, exportedFunc, helper,
                                                  ordinalSet);
+
+      // Then try util.specialize op-based specialization (new flow)
+      specializeExportedFunctionBySpecializeOps(exportOp, exportedFunc,
+                                                ordinalSet);
+
+      // Handle SpecializableLayoutAttr-based specialization
+      specializeExportedFunctionBySpecializableLayout(exportOp, exportedFunc,
+                                                      ordinalSet);
     }
 
     // TODO(#21623): We need DCE after this pass as it can leave around

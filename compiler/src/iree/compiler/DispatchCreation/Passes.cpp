@@ -17,6 +17,11 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
+// External flag from EncodingAttrs.cpp that controls dynamic layout
+// specialization. When enabled, encodings can provide multiple specialized
+// variants that are selected at runtime based on encoding dimension values.
+extern llvm::cl::opt<bool> clEnableDynamicEncodingSpecialization;
+
 namespace mlir::iree_compiler::DispatchCreation {
 //===----------------------------------------------------------------------===//
 // Command Line Options
@@ -293,14 +298,20 @@ static void addDispatchRegionCreationPasses(OpPassManager &passManager,
     // broadcasting ops.
     passManager.addPass(DispatchCreation::createHoistEncodingOpsPass());
   }
+  FunctionLikeNest(passManager).addPass([&]() {
+    FuseEncodingOpsIntoDispatchRegionsPassOptions passOptions;
+    passOptions.enableAggressiveFusion = clExperimentalMultiUseEncodingFusion;
+    return DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass(
+        passOptions);
+  });
+  // Insert specialization markers for dynamic layout specialization.
+  // This must run after encodings are set but before ConvertEncodingToFlow.
+  if (clEnableDynamicEncodingSpecialization) {
+    FunctionLikeNest(passManager)
+        .addPass(
+            DispatchCreation::createInsertEncodingSpecializationMarkersPass);
+  }
   FunctionLikeNest(passManager)
-      .addPass([&]() {
-        FuseEncodingOpsIntoDispatchRegionsPassOptions passOptions;
-        passOptions.enableAggressiveFusion =
-            clExperimentalMultiUseEncodingFusion;
-        return DispatchCreation::createFuseEncodingOpsIntoDispatchRegionsPass(
-            passOptions);
-      })
       .addPass(DispatchCreation::createConvertEncodingToFlowPass);
   // Hoist encoding operations into initializers when possible.
   if (options.constExprHoisting) {

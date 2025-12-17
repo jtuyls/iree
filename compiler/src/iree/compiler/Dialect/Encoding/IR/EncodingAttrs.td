@@ -117,6 +117,11 @@ def EncodingAttr :
       ]>,
       DeclareAttrInterfaceMethods<IREEEncoding_ContractionEncodingAttrInterface, [
         "getReductionDims",
+      ]>,
+      DeclareAttrInterfaceMethods<IREEEncoding_DynamicLayoutSpecializerAttr, [
+        "supportsSpecialization",
+        "getSpecializationInfo",
+        "getSpecializationDimensions",
       ]>
     ]> {
   let mnemonic = "encoding";
@@ -407,6 +412,98 @@ def SpecializedAttr :
   let parameters = (ins
     "int32_t":$seed,
     OptionalParameter<"TypeAttr", "">:$type
+  );
+}
+
+//===---------------------------------------------------------------------===//
+// iree_encoding.specializable_layout
+//===---------------------------------------------------------------------===//
+
+def SpecializableLayoutAttr :
+    IREEEncoding_AttrDef<"SpecializableLayout", [
+      DeclareAttrInterfaceMethods<IREEEncoding_SerializableAttr, [
+        "isSerialized",
+        "getNumEncodingDims",
+        "calculateStorageSizeInBytes",
+      ]>
+    ]> {
+  let mnemonic = "specializable_layout";
+
+  let summary = [{An encoding with multiple layout variants for runtime selection.}];
+
+  let description = [{
+    This attribute represents an encoding that has been resolved to multiple
+    possible layouts, where the final layout is selected at runtime based on
+    dimension values.
+
+    It contains:
+    - `num_encoding_dims`: Number of encoding dimensions (e.g., 3 for M, N, K)
+    - `specialization_ranges`: Per-variant array of IntAssumptionArrayAttr specifying
+      the dimension constraints for each variant
+    - `variant_layouts`: Array of resolved layout attributes, one per variant
+    - `fallback_layout`: Layout to use when no variant matches
+
+    This attribute is created by SpecializeEncodings when it encounters a
+    DynamicLayoutSpecializerAttr encoding. It is consumed by SpecializeExports
+    to create specialized export variants.
+  }];
+
+  let assemblyFormat = "`<` $num_dims `,` `[` $specialization_ranges `]` `,` `[` $variant_layouts `]` `,` $fallback_layout `>`";
+
+  let parameters = (ins
+    "unsigned":$num_dims,
+    "ArrayAttr":$specialization_ranges,
+    "ArrayAttr":$variant_layouts,
+    "Attribute":$fallback_layout
+  );
+
+  let genVerifyDecl = 1;
+}
+
+//===---------------------------------------------------------------------===//
+// iree_encoding.dynamic_layout_test
+//===---------------------------------------------------------------------===//
+
+def DynamicLayoutTestAttr :
+    IREEEncoding_AttrDef<"DynamicLayoutTest", [
+      DeclareAttrInterfaceMethods<IREEEncoding_SerializableAttr, [
+        "isSerialized",
+        "cloneWithLayouts",
+        "getNumEncodingDims",
+      ]>,
+      DeclareAttrInterfaceMethods<IREEEncoding_DynamicLayoutSpecializerAttr, [
+        "supportsSpecialization",
+        "getSpecializationInfo",
+        "getSpecializationDimensions",
+      ]>
+    ]> {
+  let mnemonic = "dynamic_layout_test";
+  let assemblyFormat = "`<` $num_dims `,` $variants `,` $fallback `>`";
+
+  let summary = [{A test encoding attribute for dynamic layout specialization.}];
+
+  let description = [{
+    A test attribute for dynamic layout specialization. It specifies:
+    - Number of encoding dimensions (e.g., 3 for M, N, K)
+    - Variants: An array of arrays, where each inner array contains
+      [ranges_attr, specialized_encoding_seed]
+    - Fallback: A seed value for the fallback encoding
+
+    Example:
+    ```
+    #enc = #iree_encoding.dynamic_layout_test<
+      3,  // num_dims (for M, N, K)
+      [[#util<int.assumption.array[<umax = 256>, <umax = 256>, <umax = 256>]>, 1],
+       [#util<int.assumption.array[<umin = 256>, <umin = 256>, <umin = 256>]>, 2]],
+      0   // fallback seed
+    >
+    ```
+  }];
+
+  let parameters = (ins
+    "unsigned":$num_dims,
+    "ArrayAttr":$variants,
+    "int32_t":$fallback
   );
 }
 

@@ -61,3 +61,14 @@ util.func public @canonicalize_unfoldable_constant() -> i32 {
   // CHECK-NEXT: util.return %[[R]]
   util.return %c42 : i32
 }
+
+// -----
+
+// CHECK-LABEL: @no_fold_specialize
+util.func public @no_fold_specialize(%arg0 : index) -> index {
+  // util.specialize is a marker for specialization and should NOT fold
+  // CHECK-NEXT: util.specialize %arg0 : index
+  %0 = util.specialize %arg0 : index
+  // CHECK-NEXT: util.return
+  util.return %0 : index
+}

@@ -878,6 +878,10 @@ def ResolveSwizzleHintsPass :
 def SpecializeExportsPass :
     Pass<"iree-codegen-specialize-exports", "IREE::HAL::ExecutableVariantOp">{
    let summary = "Specializes exported functions based on annotated ranges";
+   let dependentDialects = [
+     "IREE::Codegen::IREECodegenDialect",
+     "arith::ArithDialect",
+   ];
 }
 
 def StripCompilationInfoPass :

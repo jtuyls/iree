@@ -1058,3 +1058,51 @@ util.func public @dispatch_hal_executable_with_encodings(%arg0: !stream.resource
   util.return %0 : !stream.resource<*>
 }
 // CHECK-LABEL: util.func public @dispatch_hal_executable_with_encodings(
+
+// -----
+
+//------------------------------------------------------------------------------
+// DynamicLayoutTestAttr specialization tests.
+// These get converted to SpecializableLayoutAttr.
+//------------------------------------------------------------------------------
+
+#executable_target = #hal.executable.target<"llvm-cpu", "xyz", {iree.encoding.resolver = #iree_encoding.specialization_resolver<42>}>
+#device_target = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target]> : !hal.device
+#dynamic_enc = #iree_encoding.dynamic_layout_test<
+  1,  // num_dims (single dimension)
+  [[#util<int.assumption.array[<umin = 1, umax = 256>]>, 1],
+   [#util<int.assumption.array[<umin = 256>]>, 2]],
+  0   // fallback seed
+>
+
+util.global private @device = #device_target
+stream.executable private @executable_dynamic_layout {
+  stream.executable.export public @dispatch
+  builtin.module {
+    func.func @dispatch(%binding: !stream.binding) {
+      %c0 = arith.constant 0 : index
+      %tensor = stream.binding.subspan %binding[%c0] : !stream.binding -> !iree_tensor_ext.dispatch.tensor<readonly:tensor<?xf32, #dynamic_enc>>
+      return
+    }
+  }
+}
+util.func public @tensor_sizeof_dynamic_layout(%d0: index) -> index {
+  %size = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<?xf32, #dynamic_enc>{%d0} : index
+  util.return %size : index
+}
+
+// When a DynamicLayoutSpecializerAttr is encountered, it should be converted
+// to SpecializableLayoutAttr with resolved layouts for each variant.
+// The resolver (specialization_resolver<42>) provides the layouts.
+// CHECK-LABEL: stream.executable private @executable_dynamic_layout
+// CHECK:         func.func @dispatch
+// CHECK:           stream.binding.subspan
+// CHECK-SAME:        tensor<?xf32, #iree_encoding.dynamic_layout_test
+// CHECK-LABEL: util.func public @tensor_sizeof_dynamic_layout
+// CHECK:         stream.tensor.sizeof
+// The specialization_ranges is an array of IntAssumptionArrayAttr (one per variant)
+// CHECK-SAME:      tensor<?xf32, #iree_encoding.specializable_layout<1,
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 1, umax = 256>]>, #util<int.assumption.array[<umin = 256>]>]]
+// The variant_layouts array and fallback_layout
+// CHECK-SAME:        #iree_encoding.specialized<42
+// CHECK-SAME:        #iree_encoding.specialized<42

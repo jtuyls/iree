@@ -428,3 +428,171 @@ hal.executable private @static_never_applies_udiv {
 //       CHECK:   builtin.module
 //       CHECK:     func.func @fill_4xf32
 //   CHECK-NOT:     func.func
+
+// -----
+
+// Test: util.specialize-based specialization with SpecializableLayoutAttr
+// This tests the flow where util.specialize ops mark values for specialization
+// and SpecializableLayoutAttr provides variant-specific encodings on all tensor types.
+
+#executable_target_embedded_elf_aarch64 = #hal.executable.target<"llvm-cpu", "embedded-elf-aarch64">
+#pipeline_layout_spec = #hal.pipeline.layout<constants = 1, bindings = [
+  #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
+  #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>
+
+// SpecializableLayoutAttr with 2 variants + fallback, matching the util.specialize ranges
+// Variant 0: for small sizes (umin=128, umax=4096) - uses specialized<1, ...>
+// Variant 1: for large sizes (umin=4096) - uses specialized<2, ...>
+// Fallback: uses specialized<0, ...>
+#enc = #iree_encoding.specializable_layout<1, [[#util<int.assumption.array[<umin = 128, umax = 4096, udiv = 128>]>, #util<int.assumption.array[<umin = 4096, udiv = 256>]>]], [[#iree_encoding.specialized<1, tensor<?xf32>>, #iree_encoding.specialized<2, tensor<?xf32>>]], #iree_encoding.specialized<0, tensor<?xf32>>>
+
+hal.executable private @specialize_via_util_specialize_op {
+  hal.executable.variant public @variant target(#executable_target_embedded_elf_aarch64) {
+    hal.executable.export public @elementwise_with_specialize_op ordinal(0) layout(#pipeline_layout_spec) count(%arg0: !hal.device, %arg1: index) -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      hal.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @elementwise_with_specialize_op() {
+        %c0 = arith.constant 0 : index
+        %0 = hal.interface.constant.load layout(#pipeline_layout_spec) ordinal(0) : i32
+        %1 = arith.index_castui %0 : i32 to index
+        %2 = util.assume.int %1<umin = 64, umax = 1048320, udiv = 64> : index
+        %dim = iree_tensor_ext.dispatch.workload.ordinal %2, 0 : index
+
+        // util.specialize marks the dimension for specialization.
+        // The actual ranges come from the SpecializableLayoutAttr encoding.
+        %spec = util.specialize %dim : index
+
+        // All tensor types have the SpecializableLayoutAttr encoding
+        %input = hal.interface.binding.subspan layout(#pipeline_layout_spec) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?xf32, #enc>>{%spec}
+        %output = hal.interface.binding.subspan layout(#pipeline_layout_spec) binding(1) alignment(64) offset(%c0) flags(Indirect) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?xf32, #enc>>{%spec}
+        %in_tensor = iree_tensor_ext.dispatch.tensor.load %input, offsets = [0], sizes = [%spec], strides = [1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?xf32, #enc>>{%spec} -> tensor<?xf32, #enc>
+        %empty = tensor.empty(%spec) : tensor<?xf32, #enc>
+        %result = linalg.generic {
+          indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
+          iterator_types = ["parallel"]
+        } ins(%in_tensor : tensor<?xf32, #enc>) outs(%empty : tensor<?xf32, #enc>) {
+        ^bb0(%in: f32, %out: f32):
+          %neg = arith.negf %in : f32
+          linalg.yield %neg : f32
+        } -> tensor<?xf32, #enc>
+        iree_tensor_ext.dispatch.tensor.store %result, %output, offsets = [0], sizes = [%spec], strides = [1] : tensor<?xf32, #enc> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?xf32, #enc>>{%spec}
+        return
+      }
+    }
+  }
+}
+
+// The util.specialize op should be consumed and removed, and the function
+// should be specialized into multiple variants with conditions.
+// Each function should have:
+// - The correct util.assume.int ranges
+// - The correct specialized encoding on ALL tensor types (variant 0, 1, or fallback)
+
+// CHECK-LABEL: hal.executable private @specialize_via_util_specialize_op
+
+// First export: specialized for small sizes (umin=128, umax=4096, udiv=128)
+//       CHECK:   hal.executable.export public @elementwise_with_specialize_op ordinal(0)
+//  CHECK-SAME:     condition
+//       CHECK:       arith.cmpi uge
+//       CHECK:       arith.cmpi ule
+//       CHECK:       arith.remui
+//       CHECK:       hal.return
+//       CHECK:     fallback(@elementwise_with_specialize_op_0)
+
+// Second export: large sizes (umin=4096, udiv=256)
+//       CHECK:   hal.executable.export public @elementwise_with_specialize_op_0 ordinal(1)
+//  CHECK-SAME:     condition
+//       CHECK:       arith.cmpi uge
+//       CHECK:       arith.remui
+//       CHECK:       hal.return
+//       CHECK:     fallback(@elementwise_with_specialize_op_0_1)
+
+// Third export: final fallback
+//       CHECK:   hal.executable.export public @elementwise_with_specialize_op_0_1 ordinal(2)
+//       CHECK:       iree_tensor_ext.dispatch.workgroup_count_from_slice()
+
+//       CHECK:   builtin.module
+
+// First function: specialized for small sizes with variant 0 encoding (specialized<1>)
+// CHECK-LABEL:     func.func @elementwise_with_specialize_op()
+//   CHECK-NOT:       util.specialize
+//       CHECK:       util.assume.int %{{.*}}<umin = 128, umax = 4096, udiv = 128>
+//       CHECK:       hal.interface.binding.subspan
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<1, tensor<?xf32>>>
+//       CHECK:       hal.interface.binding.subspan
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<1, tensor<?xf32>>>
+//       CHECK:       linalg.generic
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<1, tensor<?xf32>>>
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<1, tensor<?xf32>>>
+
+// Second function: specialized for large sizes with variant 1 encoding (specialized<2>)
+// CHECK-LABEL:     func.func @elementwise_with_specialize_op_0()
+//   CHECK-NOT:       util.specialize
+//       CHECK:       util.assume.int %{{.*}}<umin = 4096, udiv = 256>
+//       CHECK:       hal.interface.binding.subspan
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<2, tensor<?xf32>>>
+//       CHECK:       hal.interface.binding.subspan
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<2, tensor<?xf32>>>
+//       CHECK:       linalg.generic
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<2, tensor<?xf32>>>
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<2, tensor<?xf32>>>
+
+// Third function: fallback with original assume and fallback encoding (specialized<0>)
+// CHECK-LABEL:     func.func @elementwise_with_specialize_op_0_1()
+//   CHECK-NOT:       util.specialize
+// The original assume should still be present (no additional specialization assume)
+//       CHECK:       util.assume.int %{{.*}}<umin = 64, umax = 1048320, udiv = 64>
+//   CHECK-NOT:       util.assume.int %{{.*}}<umin = 128
+//   CHECK-NOT:       util.assume.int %{{.*}}<umin = 4096
+//       CHECK:       hal.interface.binding.subspan
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<0, tensor<?xf32>>>
+//       CHECK:       hal.interface.binding.subspan
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<0, tensor<?xf32>>>
+//       CHECK:       linalg.generic
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<0, tensor<?xf32>>>
+//  CHECK-SAME:         tensor<?xf32, #iree_encoding.specialized<0, tensor<?xf32>>>
+
+// -----
+
+// Test: SpecializableLayoutAttr fallback-only (no util.specialize op)
+// When there's no util.specialize op, the pass just uses the fallback layout
+// without creating specialized export variants.
+
+#executable_target_fallback = #hal.executable.target<"llvm-cpu", "embedded-elf-x86_64">
+#pipeline_layout_fallback = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer>, #hal.pipeline.binding<storage_buffer>]>
+
+// SpecializableLayoutAttr: <num_dims, [ranges_array], [layouts_array], fallback>
+#enc_fallback = #iree_encoding.specializable_layout<1, [[#util<int.assumption.array[<umin = 1, umax = 256>]>, #util<int.assumption.array[<umin = 256>]>]], [[#iree_encoding.specialized<1, tensor<?xf32>>, #iree_encoding.specialized<2, tensor<?xf32>>]], #iree_encoding.specialized<0, tensor<?xf32>>>
+
+hal.executable public @specialize_by_layout_fallback_only {
+  hal.executable.variant public @variant target(#executable_target_fallback) {
+    hal.executable.export public @entry ordinal(0) layout(#pipeline_layout_fallback) count(%device: !hal.device, %workload0: index) -> (index, index, index) {
+      %c1 = arith.constant 1 : index
+      hal.return %c1, %c1, %c1 : index, index, index
+    }
+    builtin.module {
+      func.func @entry() {
+        %c0 = arith.constant 0 : index
+        %c16 = arith.constant 16 : index
+        %input = hal.interface.binding.subspan layout(#pipeline_layout_fallback) binding(0) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?xf32, #enc_fallback>>{%c16}
+        %output = hal.interface.binding.subspan layout(#pipeline_layout_fallback) binding(1) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?xf32>>{%c16}
+        %tensor = iree_tensor_ext.dispatch.tensor.load %input, offsets = [0], sizes = [%c16], strides = [1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<?xf32, #enc_fallback>>{%c16} -> tensor<?xf32>
+        iree_tensor_ext.dispatch.tensor.store %tensor, %output, offsets = [0], sizes = [%c16], strides = [1] : tensor<?xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<?xf32>>{%c16}
+        return
+      }
+    }
+  }
+}
+
+// CHECK-LABEL: hal.executable public @specialize_by_layout_fallback_only
+// CHECK:         hal.executable.variant public @variant
+// Only one export (no specialization)
+// CHECK:           hal.executable.export public @entry ordinal(0)
+// CHECK-NOT:         condition
+// CHECK:           builtin.module
+// CHECK:             func.func @entry
+// The encoding should be replaced with the fallback layout (specialized<0>)
+// CHECK:               hal.interface.binding.subspan
+// CHECK-SAME:            tensor<?xf32, #iree_encoding.specialized<0, tensor<?xf32>>>
