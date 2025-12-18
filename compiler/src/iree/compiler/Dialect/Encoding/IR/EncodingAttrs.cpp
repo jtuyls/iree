@@ -488,14 +488,37 @@ std::optional<SmallVector<int32_t>> EncodingAttr::getReductionDims() const {
 // The implementation is controlled by the clEnableDynamicEncodingSpecialization
 // flag defined at the top of this file.
 
+/// Returns the indices of dynamic dimensions in iteration_sizes.
+/// A dimension is dynamic if its value is ShapedType::kDynamic.
+static SmallVector<unsigned>
+getDynamicDimensionIndices(ArrayAttr iterationSizes) {
+  if (!iterationSizes) {
+    return {};
+  }
+  SmallVector<unsigned> dynamicDims;
+  for (auto [idx, attr] : llvm::enumerate(iterationSizes)) {
+    int64_t value = cast<IntegerAttr>(attr).getInt();
+    if (ShapedType::isDynamic(value)) {
+      dynamicDims.push_back(idx);
+    }
+  }
+  return dynamicDims;
+}
+
 bool EncodingAttr::supportsSpecialization() const {
-  // Only support specialization if the flag is enabled and we have valid
-  // iteration sizes (which tells us the encoding dimensions to specialize on).
+  // Only support specialization if the flag is enabled.
   if (!::clEnableDynamicEncodingSpecialization) {
     return false;
   }
-  std::optional<unsigned> numDims = getNumEncodingDims();
-  return numDims.has_value() && numDims.value() > 0;
+  // Check that we have iteration_sizes with exactly one dynamic dimension.
+  ArrayAttr iterationSizes = getIterationSizes();
+  if (!iterationSizes) {
+    return false;
+  }
+  SmallVector<unsigned> dynamicDims =
+      getDynamicDimensionIndices(iterationSizes);
+  // For now, only support exactly one dynamic dimension.
+  return dynamicDims.size() == 1;
 }
 
 std::optional<SpecializationInfo> EncodingAttr::getSpecializationInfo() const {
@@ -503,24 +526,59 @@ std::optional<SpecializationInfo> EncodingAttr::getSpecializationInfo() const {
     return std::nullopt;
   }
 
-  std::optional<unsigned> numDims = getNumEncodingDims();
-  if (!numDims) {
+  ArrayAttr iterationSizes = getIterationSizes();
+  SmallVector<unsigned> dynamicDims =
+      getDynamicDimensionIndices(iterationSizes);
+
+  // We only support exactly one dynamic dimension for now.
+  if (dynamicDims.size() != 1) {
     return std::nullopt;
   }
 
   SpecializationInfo info;
-  info.numEncodingDims = numDims.value();
+  // numEncodingDims is the number of dynamic dimensions we're specializing on.
+  info.numEncodingDims = dynamicDims.size();
 
-  // For now, just return a fallback encoding with no specialized variants.
-  // This allows e2e testing to verify the basic flow works before adding
-  // specialized ranges.
-  // The fallback encoding is the current EncodingAttr itself, which will be
-  // resolved to a layout suitable for any size.
+  // The fallback uses the original EncodingAttr (with dynamic iteration_sizes).
+  // The layout resolver will pick a conservative layout for unknown sizes.
   info.fallbackEncoding = *this;
 
-  // No variants - all inputs will use the fallback path.
-  // TODO: Add specialized variants for different size ranges (e.g., small vs
-  // large matrices) once the basic flow is verified.
+  // Create one specialization variant for "large" sizes.
+  // The variant covers sizes >= 512, divisible by 256.
+  // We create a new EncodingAttr with the dynamic dimension replaced by the
+  // expected minimum size (512) so the layout resolver can pick optimal tiles.
+  constexpr int64_t kLargeThreshold = 512;
+  constexpr int64_t kDivisor = 256;
+
+  SpecializationVariant variant;
+
+  // Create a range for the dynamic dimension: sizes >= 512, divisible by 256.
+  SmallVector<IREE::Util::IntAssumptionAttr> dimRanges;
+  auto assumption = IREE::Util::IntAssumptionAttr::get(
+      getContext(), /*umin=*/kLargeThreshold, /*umax=*/std::nullopt,
+      /*udiv=*/kDivisor);
+  dimRanges.push_back(assumption);
+  variant.ranges =
+      IREE::Util::IntAssumptionArrayAttr::get(getContext(), dimRanges);
+
+  // Create a variant EncodingAttr with the dynamic dimension replaced by
+  // the expected minimum size. This allows the layout resolver to select
+  // tile sizes optimized for large inputs.
+  unsigned dynamicDimIdx = dynamicDims[0];
+  SmallVector<int64_t> variantIterationSizes = getIterationSizesArray();
+  variantIterationSizes[dynamicDimIdx] = kLargeThreshold;
+
+  // Get element types from the ArrayAttr.
+  SmallVector<Type> elementTypes =
+      llvm::map_to_vector(getElementTypes().getValue(), [](Attribute a) {
+        return cast<TypeAttr>(a).getValue();
+      });
+
+  variant.encoding = EncodingAttr::get(getContext(), getOperandIndex().getInt(),
+                                       getOpType().getValue(), elementTypes,
+                                       getRootMaps(), variantIterationSizes);
+
+  info.variants.push_back(variant);
 
   return info;
 }
@@ -530,17 +588,8 @@ SmallVector<unsigned> EncodingAttr::getSpecializationDimensions() const {
     return {};
   }
 
-  std::optional<unsigned> numDims = getNumEncodingDims();
-  if (!numDims) {
-    return {};
-  }
-
-  // Return all encoding dimension indices for specialization.
-  SmallVector<unsigned> result;
-  for (unsigned i = 0; i < numDims.value(); ++i) {
-    result.push_back(i);
-  }
-  return result;
+  ArrayAttr iterationSizes = getIterationSizes();
+  return getDynamicDimensionIndices(iterationSizes);
 }
 
 //===---------------------------------------------------------------------===//

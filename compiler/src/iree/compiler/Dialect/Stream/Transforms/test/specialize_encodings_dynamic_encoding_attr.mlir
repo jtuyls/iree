@@ -16,45 +16,51 @@
 #device_target = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target]> : !hal.device
 
 // LHS encoding with matmul user indexing maps and iteration_sizes
-#encoding_lhs = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, ?, ?]>
+// Only M dimension is dynamic, N=1024 and K=512 are static.
+// This triggers specialization (exactly 1 dynamic dimension).
+#encoding_lhs = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, 1024, 512]>
 
 // RHS encoding
-#encoding_rhs = #iree_encoding.encoding<operand_index = 1 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, ?, ?]>
+#encoding_rhs = #iree_encoding.encoding<operand_index = 1 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, 1024, 512]>
 
 // Result encoding
-#encoding_result = #iree_encoding.encoding<operand_index = 2 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, ?, ?]>
+#encoding_result = #iree_encoding.encoding<operand_index = 2 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, 1024, 512]>
 
 util.global private @device = #device_target
-util.func public @matmul_encoding_dynamic_specialization(%d0: index, %d1: index, %d2: index) -> (index, index, index) {
-  %size_lhs = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<?x?xf32, #encoding_lhs>{%d0, %d2} : index
-  %size_rhs = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<?x?xf32, #encoding_rhs>{%d2, %d1} : index
-  %size_result = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<?x?xf32, #encoding_result>{%d0, %d1} : index
+util.func public @matmul_encoding_dynamic_specialization(%d0: index) -> (index, index, index) {
+  %c1024 = arith.constant 1024 : index
+  %c512 = arith.constant 512 : index
+  %size_lhs = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<?x512xf32, #encoding_lhs>{%d0} : index
+  %size_rhs = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<512x1024xf32, #encoding_rhs> : index
+  %size_result = stream.tensor.sizeof on(#hal.device.affinity<@device>) tensor<?x1024xf32, #encoding_result>{%d0} : index
   util.return %size_lhs, %size_rhs, %size_result : index, index, index
 }
 
-// When dynamic specialization is enabled for EncodingAttr:
-// - supportsSpecialization() returns true (because iteration_sizes is present)
-// - getSpecializationInfo() returns just a fallback encoding (no variants yet)
-// - The resolver resolves the fallback to a layout
-// - Result is SpecializableLayoutAttr with empty variants and fallback layout
+// When dynamic specialization is enabled for EncodingAttr with exactly 1 dynamic dimension:
+// - supportsSpecialization() returns true
+// - getSpecializationInfo() returns 1 variant (for M>=512) + fallback
+// - Each gets resolved to a layout
+// - Result is SpecializableLayoutAttr with 1 variant and fallback layout
 
 // CHECK-LABEL: util.func public @matmul_encoding_dynamic_specialization
-// CHECK-SAME:    (%[[D0:.+]]: index, %[[D1:.+]]: index, %[[D2:.+]]: index)
+// CHECK-SAME:    (%[[D0:.+]]: index)
 //
-// LHS tensor: ?x? with encoding -> specializable_layout with 3 encoding dims
+// LHS tensor: ?x512 with encoding -> specializable_layout with 1 encoding dim
+// The variant layout has ranges <umin = 512, udiv = 256>
 // CHECK:         %[[SIZE_LHS:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device>)
-// CHECK-SAME:      tensor<?x?xf32, #iree_encoding.specializable_layout<3, {{\[\[}}{{\]\]}}, {{\[\[}}{{\]\]}}, #iree_encoding.specialized<42, tensor<?x?xf32>>>>
-// CHECK-SAME:      {%[[D0]], %[[D2]]} : index
+// CHECK-SAME:      tensor<?x512xf32, #iree_encoding.specializable_layout<1,
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 512, udiv = 256>]>{{\]\]}}
+// CHECK-SAME:        {%[[D0]]} : index
 //
-// RHS tensor: ?x? with encoding -> specializable_layout with 3 encoding dims
+// RHS tensor: 512x1024 (fully static, no dynamic dims to specialize on)
 // CHECK:         %[[SIZE_RHS:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device>)
-// CHECK-SAME:      tensor<?x?xf32, #iree_encoding.specializable_layout<3, {{\[\[}}{{\]\]}}, {{\[\[}}{{\]\]}}, #iree_encoding.specialized<42, tensor<?x?xf32>>>>
-// CHECK-SAME:      {%[[D2]], %[[D1]]} : index
+// CHECK-SAME:      tensor<512x1024xf32, #iree_encoding.specializable_layout<1,
 //
-// Result tensor: ?x? with encoding -> specializable_layout with 3 encoding dims
+// Result tensor: ?x1024 with encoding -> specializable_layout with 1 encoding dim
 // CHECK:         %[[SIZE_RES:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device>)
-// CHECK-SAME:      tensor<?x?xf32, #iree_encoding.specializable_layout<3, {{\[\[}}{{\]\]}}, {{\[\[}}{{\]\]}}, #iree_encoding.specialized<42, tensor<?x?xf32>>>>
-// CHECK-SAME:      {%[[D0]], %[[D1]]} : index
+// CHECK-SAME:      tensor<?x1024xf32, #iree_encoding.specializable_layout<1,
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 512, udiv = 256>]>{{\]\]}}
+// CHECK-SAME:        {%[[D0]]} : index
 //
 // CHECK:         util.return %[[SIZE_LHS]], %[[SIZE_RHS]], %[[SIZE_RES]]
 
@@ -90,7 +96,7 @@ util.func public @encoding_without_iteration_sizes(%d0: index, %d1: index) -> in
 
 //------------------------------------------------------------------------------
 // GPU resolver test with EncodingAttr dynamic specialization.
-// This tests that EncodingAttr works with the real GPU encoding resolver.
+// This tests that EncodingAttr with exactly 1 dynamic dimension gets specialized.
 //------------------------------------------------------------------------------
 
 #map0 = affine_map<(m, n, k) -> (m, k)>
@@ -117,32 +123,42 @@ util.func public @encoding_without_iteration_sizes(%d0: index, %d1: index) -> in
   }>
 #device_target_gpu = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target_rocm]> : !hal.device
 
-// Matmul LHS encoding with iteration_sizes for dynamic specialization
-#encoding_gpu_lhs = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, ?, ?]>
+// Matmul LHS encoding with exactly 1 dynamic dimension (M) for specialization
+#encoding_gpu_lhs = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, 1024, 512]>
 
 util.global private @device_gpu = #device_target_gpu
-util.func public @gpu_encoding_dynamic_specialization(%d0: index, %d1: index) -> index {
-  %size = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>) tensor<?x?xf32, #encoding_gpu_lhs>{%d0, %d1} : index
+util.func public @gpu_encoding_dynamic_specialization(%d0: index) -> index {
+  %size = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>) tensor<?x512xf32, #encoding_gpu_lhs>{%d0} : index
   util.return %size : index
 }
 
-// With GPU resolver and dynamic specialization enabled, the EncodingAttr gets:
-// - Converted to SpecializableLayoutAttr (because iteration_sizes is present)
-// - The fallback layout is resolved by the GPU resolver to a layout with encoding_info
+// With GPU resolver and exactly 1 dynamic dimension:
+// - Gets converted to SpecializableLayoutAttr with 1 variant and fallback
+// - The variant has range <umin = 512, udiv = 256>
+// - Both variant and fallback are resolved by the GPU resolver
+// - IMPORTANTLY: The variant and fallback have DIFFERENT tile sizes!
+//   Variant (M=512): innerTileSizes = [32, 16]
+//   Fallback (M=?):  innerTileSizes = [128, 16]
 // CHECK-LABEL: util.func public @gpu_encoding_dynamic_specialization
-// CHECK-SAME:    (%[[D0:.+]]: index, %[[D1:.+]]: index)
+// CHECK-SAME:    (%[[D0:.+]]: index)
 // CHECK:         %[[SIZE:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>)
-// The encoding should be specializable_layout with 3 dims, empty variants, and GPU-resolved fallback
-// CHECK-SAME:      tensor<?x?xf32, #iree_encoding.specializable_layout<3, {{\[\[}}{{\]\]}}, {{\[\[}}{{\]\]}},
-// The fallback layout contains GPU resolver info with encoding_info
-// CHECK-SAME:        #iree_gpu.gpu_encoding_resolver
-// CHECK-SAME:        encoding_info = {innerDimsPos = [{{.+}}], innerTileSizes = [{{.+}}], outerDimsPerm = [{{.+}}]}
-// CHECK-SAME:      >{%[[D0]], %[[D1]]} : index
+// The encoding should be specializable_layout with 1 encoding dim
+// CHECK-SAME:      tensor<?x512xf32, #iree_encoding.specializable_layout<1,
+// The variant ranges: M >= 512, divisible by 256
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 512, udiv = 256>]>{{\]\]}}
+// The variant layout (GPU resolver) - smaller tiles for M=512
+// CHECK-SAME:        {{\[\[}}#iree_gpu.gpu_encoding_resolver<configuration = {encoding_info = {innerDimsPos = [0, 1], innerTileSizes = [32, 16], outerDimsPerm = [0, 1], swizzle = {expandShape = {{\[\[}}{{\[}}"CrossIntrinsic", 2 : i16{{\]}}, {{\[}}"CrossThread", 16 : i16{{\]\]}}, {{\[\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 4 : i16{{\]\]\]}}, permutation = [0, 3, 1, 2]}}}>
+// CHECK-SAME:        {{\]\]}}
+// The fallback layout (GPU resolver) - larger tiles for dynamic M
+// CHECK-SAME:        #iree_gpu.gpu_encoding_resolver<configuration = {encoding_info = {innerDimsPos = [0, 1], innerTileSizes = [128, 16], outerDimsPerm = [0, 1], swizzle = {expandShape = {{\[\[}}{{\[}}"CrossThread", 2 : i16{{\]}}, {{\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 16 : i16{{\]\]}}, {{\[\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 4 : i16{{\]\]\]}}, permutation = [0, 1, 4, 2, 3]}}}>
+// CHECK-SAME:        >>
+// CHECK-SAME:      {%[[D0]]} : index
 // CHECK:         util.return %[[SIZE]]
 
 // -----
 
-// Test GPU resolver WITHOUT iteration_sizes (no dynamic specialization).
+// Test GPU resolver with 3 dynamic dimensions (not supported, falls back to regular layout).
+// Currently only exactly 1 dynamic dimension is supported for specialization.
 
 #map0 = affine_map<(m, n, k) -> (m, k)>
 #map1 = affine_map<(m, n, k) -> (k, n)>
@@ -168,17 +184,17 @@ util.func public @gpu_encoding_dynamic_specialization(%d0: index, %d1: index) ->
   }>
 #device_target_gpu = #hal.device.target<"local", {ordinal = 0 : index}, [#executable_target_rocm]> : !hal.device
 
-// Encoding WITHOUT iteration_sizes - should get regular layout, not specializable_layout
-#encoding_gpu_no_iter = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2]>
+// Encoding with 3 dynamic dimensions - doesn't get specialized (only 1 dynamic dim supported)
+#encoding_gpu_3_dyn = #iree_encoding.encoding<operand_index = 0 : index, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map0, #map1, #map2], iteration_sizes = [?, ?, ?]>
 
 util.global private @device_gpu = #device_target_gpu
 util.func public @gpu_encoding_no_specialization(%d0: index, %d1: index) -> index {
-  %size = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>) tensor<?x?xf32, #encoding_gpu_no_iter>{%d0, %d1} : index
+  %size = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>) tensor<?x?xf32, #encoding_gpu_3_dyn>{%d0, %d1} : index
   util.return %size : index
 }
 
-// Without iteration_sizes, encoding gets a regular layout (not specializable_layout)
-// CHECK:       #[[$GPU_LAYOUT:.+]] = #iree_encoding.layout<[#iree_gpu.gpu_encoding_resolver<{{.+}}encoding_info = {innerDimsPos = [{{.+}}], innerTileSizes = [{{.+}}], outerDimsPerm = [{{.+}}]{{.+}}}}>]>
+// With 3 dynamic dimensions, supportsSpecialization() returns false, so it gets a regular layout
+// CHECK-DAG:   #[[$GPU_LAYOUT:.+]] = #iree_encoding.layout<[#iree_gpu.gpu_encoding_resolver<{{.+}}encoding_info = {innerDimsPos = [{{.+}}], innerTileSizes = [{{.+}}], outerDimsPerm = [{{.+}}]{{.+}}}}>]>
 // CHECK-LABEL: util.func public @gpu_encoding_no_specialization
 // CHECK-SAME:    (%[[D0:.+]]: index, %[[D1:.+]]: index)
 // CHECK:         %[[SIZE:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>)

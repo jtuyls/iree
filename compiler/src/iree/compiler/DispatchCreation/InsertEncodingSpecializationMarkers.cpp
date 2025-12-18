@@ -23,7 +23,8 @@
 
 namespace mlir::iree_compiler::DispatchCreation {
 
-#define DEBUG_TYPE "iree-dispatch-creation-insert-encoding-specialization-markers"
+#define DEBUG_TYPE                                                             \
+  "iree-dispatch-creation-insert-encoding-specialization-markers"
 
 #define GEN_PASS_DEF_INSERTENCODINGSPECIALIZATIONMARKERSPASS
 #include "iree/compiler/DispatchCreation/Passes.h.inc"
@@ -109,4 +110,3 @@ struct InsertEncodingSpecializationMarkersPass
 } // namespace
 
 } // namespace mlir::iree_compiler::DispatchCreation
-

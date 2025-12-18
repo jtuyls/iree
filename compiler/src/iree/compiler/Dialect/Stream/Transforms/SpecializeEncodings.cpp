@@ -78,14 +78,33 @@ static bool isRecognizedEncodingType(Type type) {
 }
 
 /// Resolves a layout for a given encoding using the layout resolvers.
-static Attribute
-resolveLayoutForEncoding(RankedTensorType type, Attribute encoding,
-                         const SetVector<Attribute> &layoutResolvers) {
+/// If assumptions are provided, they are passed to the resolver via
+/// cloneWithSimplifiedConfig so the resolver can use them for layout selection.
+static Attribute resolveLayoutForEncoding(
+    RankedTensorType type, Attribute encoding,
+    const SetVector<Attribute> &layoutResolvers,
+    IREE::Util::IntAssumptionArrayAttr assumptions = nullptr) {
   auto typeWithEncoding = type.cloneWithEncoding(encoding);
   SmallVector<Attribute> layouts;
   for (auto attr : layoutResolvers) {
     auto encodingLayoutAttr = cast<IREE::Encoding::LayoutResolverAttr>(attr);
-    Attribute layout = encodingLayoutAttr.getLayout(typeWithEncoding);
+
+    // If assumptions are provided, create a resolver with the assumptions
+    // added to its configuration.
+    IREE::Encoding::LayoutResolverAttr resolverToUse = encodingLayoutAttr;
+    if (assumptions) {
+      MLIRContext *ctx = type.getContext();
+      SmallVector<NamedAttribute> configItems;
+      configItems.push_back(NamedAttribute(
+          StringAttr::get(ctx, "iree.encoding.size_assumptions"), assumptions));
+      DictionaryAttr config = DictionaryAttr::get(ctx, configItems);
+      if (auto cloned = dyn_cast_if_present<IREE::Encoding::LayoutResolverAttr>(
+              encodingLayoutAttr.cloneWithSimplifiedConfig(config))) {
+        resolverToUse = cloned;
+      }
+    }
+
+    Attribute layout = resolverToUse.getLayout(typeWithEncoding);
     if (!layout) {
       return nullptr;
     }
@@ -138,13 +157,15 @@ static Type getTypeWithResolvedEncodingLayouts(
       SmallVector<Attribute> variantRanges;
       SmallVector<Attribute> variantLayouts;
 
-      // Resolve layouts for each variant
+      // Resolve layouts for each variant, passing the variant's ranges as
+      // assumptions to the resolver for size-aware layout selection.
       for (const auto &variant : specInfo->variants) {
         variantRanges.push_back(variant.ranges);
 
-        // Resolve layout for this variant's encoding
-        Attribute layout = resolveLayoutForEncoding(
-            rankedTensorType, variant.encoding, layoutResolvers);
+        // Resolve layout for this variant's encoding, passing the ranges
+        Attribute layout =
+            resolveLayoutForEncoding(rankedTensorType, variant.encoding,
+                                     layoutResolvers, variant.ranges);
         if (!layout) {
           LLVM_DEBUG(llvm::dbgs() << "Failed to resolve layout for variant\n");
           return nullptr;
@@ -152,9 +173,10 @@ static Type getTypeWithResolvedEncodingLayouts(
         variantLayouts.push_back(layout);
       }
 
-      // Resolve fallback layout
+      // Resolve fallback layout (no assumptions - works for any size)
       Attribute fallbackLayout = resolveLayoutForEncoding(
-          rankedTensorType, specInfo->fallbackEncoding, layoutResolvers);
+          rankedTensorType, specInfo->fallbackEncoding, layoutResolvers,
+          /*assumptions=*/nullptr);
       if (!fallbackLayout) {
         LLVM_DEBUG(llvm::dbgs() << "Failed to resolve fallback layout\n");
         return nullptr;

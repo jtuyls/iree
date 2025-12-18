@@ -85,4 +85,3 @@ util.func public @empty_variants(%arg0: tensor<?xf32, #empty_variants_enc>) -> t
 // CHECK-LABEL: util.func public @empty_variants
 // CHECK-NOT:     iree_encoding.encoding_dim
 // CHECK-NOT:     util.specialize
-

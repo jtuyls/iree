@@ -621,6 +621,13 @@ struct GPULayoutResolverAttr final
       configItems.emplace_back(StringAttr::get(ctx, kUKernelProviderName),
                                ukernelProvider);
     }
+    // Pass along size assumptions for specialization-aware layout selection.
+    if (config) {
+      if (auto assumptions =
+              config.getNamed("iree.encoding.size_assumptions")) {
+        configItems.push_back(*assumptions);
+      }
+    }
     return GPUEncodingResolverAttr::get(ctx,
                                         DictionaryAttr::get(ctx, configItems));
   }
