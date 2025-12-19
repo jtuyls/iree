@@ -310,6 +310,9 @@ static void addDispatchRegionCreationPasses(OpPassManager &passManager,
     FunctionLikeNest(passManager)
         .addPass(
             DispatchCreation::createInsertEncodingSpecializationMarkersPass);
+    // Canonicalize to fold away encoding_dim ops, leaving util.specialize
+    // consuming the actual dimension values.
+    FunctionLikeNest(passManager).addPass(mlir::createCanonicalizerPass);
   }
   FunctionLikeNest(passManager)
       .addPass(DispatchCreation::createConvertEncodingToFlowPass);

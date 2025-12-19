@@ -106,7 +106,8 @@ static MMAAttr chooseIntrinsicMMAAttr(TypeRange eTypes, TargetWgpAttr wgp) {
 static DataTiledMMAInterfaceAttr
 chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
                        IREE::Encoding::EncodingAttr encoding,
-                       GPUEncodingResolverAttr resolver) {
+                       GPUEncodingResolverAttr resolver,
+                       IREE::Util::IntAssumptionArrayAttr sizeAssumptions = nullptr) {
   if (!target) {
     return {};
   }
@@ -250,22 +251,49 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   FailureOr<IREE::Encoding::BxMxNxKxKb> matmulSizes =
       getEncodingContractionLikeSizes(encoding);
   if (succeeded(matmulSizes)) {
-    if (!ShapedType::isDynamic(matmulSizes->M)) {
+    int64_t M = matmulSizes->M;
+    int64_t N = matmulSizes->N;
+    
+    // If size assumptions are provided and a dimension is dynamic, use the
+    // assumption's umin value for tile size selection.
+    if (sizeAssumptions) {
+      ArrayRef<IREE::Util::IntAssumptionAttr> assumptions = 
+          sizeAssumptions.getValue();
+      // For now, we only support exactly one assumption for one dynamic dimension.
+      assert(assumptions.size() == 1 && 
+             "Expected exactly one size assumption");
+      
+      // Determine which dimension is dynamic and apply the assumption.
+      int numDynamicDims = (ShapedType::isDynamic(M) ? 1 : 0) + 
+                           (ShapedType::isDynamic(N) ? 1 : 0);
+      assert(numDynamicDims == 1 && 
+             "Expected exactly one dynamic dimension in M or N");
+      
+      IREE::Util::IntAssumptionAttr assumption = assumptions[0];
+      std::optional<int64_t> umin = assumption.getUmin();
+      assert(umin.has_value() && "Expected umin in size assumption");
+      
+      if (ShapedType::isDynamic(M)) {
+        M = *umin;
+      } else if (ShapedType::isDynamic(N)) {
+        N = *umin;
+      }
+    }
+    
+    if (!ShapedType::isDynamic(M)) {
       // Cap maxTotalUnrollM to avoid excessive padding.
-      maxTotalUnrollM = llvm::divideCeil(matmulSizes->M, intrinsicMSize);
+      maxTotalUnrollM = llvm::divideCeil(M, intrinsicMSize);
     }
-    if (!ShapedType::isDynamic(matmulSizes->N)) {
+    if (!ShapedType::isDynamic(N)) {
       // Cap maxTotalUnrollN to avoid excessive padding.
-      maxTotalUnrollN = llvm::divideCeil(matmulSizes->N, intrinsicNSize);
+      maxTotalUnrollN = llvm::divideCeil(N, intrinsicNSize);
     }
-    if (!ShapedType::isDynamic(matmulSizes->M) &&
-        !ShapedType::isDynamic(matmulSizes->N)) {
+    if (!ShapedType::isDynamic(M) && !ShapedType::isDynamic(N)) {
       // Cap maxTotalUnrollMN to avoid underutilizing the workgroups available.
       IREE::GPU::TargetChipAttr chip = target.getChip();
       int64_t numWGPs = chip ? chip.getWgpCount() : 512;
       maxTotalUnrollMN =
-          llvm::divideCeil(matmulSizes->M * matmulSizes->N,
-                           numWGPs * intrinsicMSize * intrinsicNSize);
+          llvm::divideCeil(M * N, numWGPs * intrinsicMSize * intrinsicNSize);
     }
   }
   // Iterate over possible tm.
@@ -431,9 +459,21 @@ static Operation *lowerContractionOrScaledContractionOpToInnerTiledOp(
   }
 
   IREE::Encoding::EncodingAttr resultEncoding = operandEncodings.back();
+  
+  // Extract size assumptions from config if available.
+  IREE::Util::IntAssumptionArrayAttr sizeAssumptions = nullptr;
+  DictionaryAttr config = resolver.getConfiguration();
+  if (config) {
+    if (auto assumptions = config.getNamed("iree.encoding.size_assumptions")) {
+      sizeAssumptions = 
+          dyn_cast_if_present<IREE::Util::IntAssumptionArrayAttr>(
+              assumptions->getValue());
+    }
+  }
+  
   IREE::GPU::DataTiledMMAInterfaceAttr dataTiledAttr =
       chooseDataTiledMMAAttr(resultEncoding.getElementTypesArray(), targetAttr,
-                             resultEncoding, resolver);
+                             resultEncoding, resolver, sizeAssumptions);
   if (!dataTiledAttr) {
     LDBG() << "expect encodings on operand types";
     return nullptr;
@@ -528,8 +568,19 @@ struct GPUEncodingPackedLayoutMaterializerAttr
       return info;
     }
 
+    // Extract size assumptions from config if available.
+    IREE::Util::IntAssumptionArrayAttr sizeAssumptions = nullptr;
+    if (config) {
+      if (auto assumptions = config.getNamed("iree.encoding.size_assumptions")) {
+        sizeAssumptions = 
+            dyn_cast_if_present<IREE::Util::IntAssumptionArrayAttr>(
+                assumptions->getValue());
+      }
+    }
+
     DataTiledMMAInterfaceAttr mma = chooseDataTiledMMAAttr(
-        encoding.getElementTypesArray(), gpuAttr, encoding, resolver);
+        encoding.getElementTypesArray(), gpuAttr, encoding, resolver, 
+        sizeAssumptions);
     if (!mma) {
       return info;
     }

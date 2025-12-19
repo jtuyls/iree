@@ -297,6 +297,133 @@ struct TensorCastEncodingDimModel
   }
 };
 
+/// External model for tensor::EmptyOp to implement
+/// EncodingDimReificationInterface. tensor.empty can directly provide encoding
+/// dim values from its dynamic_sizes operands.
+struct TensorEmptyEncodingDimModel
+    : public IREE::Encoding::EncodingDimReificationInterface::ExternalModel<
+          TensorEmptyEncodingDimModel, tensor::EmptyOp> {
+
+  FailureOr<Value> reifyEncodingDim(Operation *op, OpBuilder &builder,
+                                    unsigned resultIndex,
+                                    unsigned dimIndex) const {
+    auto emptyOp = cast<tensor::EmptyOp>(op);
+
+    // Only result index 0 is valid for tensor.empty.
+    if (resultIndex != 0)
+      return failure();
+
+    auto resultType = dyn_cast<RankedTensorType>(emptyOp.getType());
+    if (!resultType)
+      return failure();
+
+    auto encoding =
+        dyn_cast_or_null<IREE::Encoding::EncodingAttr>(resultType.getEncoding());
+    if (!encoding)
+      return failure();
+
+    // For matmul encodings, encoding dimensions map directly to the iteration
+    // dimensions (M, N, K). For the result tensor, we need to find which shape
+    // dimension corresponds to the requested encoding dimension.
+    //
+    // Example: For a matmul result with iteration_sizes = [?, 128256, 4096]
+    // and tensor<?x128256xf32>, encoding dim 0 (M dimension) corresponds to
+    // shape dim 0.
+    
+    auto iterationSizes = encoding.getIterationSizes();
+    if (!iterationSizes || dimIndex >= iterationSizes.size())
+      return failure();
+
+    // Map encoding dimension to shape dimension based on the operand index.
+    // For matmul: LHS (operand 0) = [M, K], RHS (operand 1) = [N, K], Result
+    // (operand 2) = [M, N]
+    unsigned operandIndex = encoding.getOperandIndex().getValue().getZExtValue();
+    
+    ArrayRef<int64_t> shape = resultType.getShape();
+    int64_t shapeDim = -1;
+    
+    if (operandIndex == 0) {
+      // LHS: encoding dims [M, K] -> shape dims [0, 1]
+      shapeDim = dimIndex;
+    } else if (operandIndex == 1) {
+      // RHS: encoding dims [N, K] -> shape dims [0, 1]
+      shapeDim = dimIndex;
+    } else if (operandIndex == 2) {
+      // Result: encoding dims [M, N] -> shape dims [0, 1]
+      // (K is reduction dimension, not in result shape)
+      shapeDim = dimIndex;
+    }
+    
+    if (shapeDim < 0 || shapeDim >= static_cast<int64_t>(shape.size()))
+      return failure();
+
+    // If the shape dimension is static, the encoding dimension is that static
+    // value.
+    if (!resultType.isDynamicDim(shapeDim)) {
+      return arith::ConstantIndexOp::create(builder, op->getLoc(), shape[shapeDim]).getResult();
+    }
+
+    // Find the corresponding dynamic_sizes operand.
+    unsigned dynamicDimIdx = 0;
+    for (int64_t i = 0; i < shapeDim; ++i) {
+      if (resultType.isDynamicDim(i))
+        ++dynamicDimIdx;
+    }
+
+    if (dynamicDimIdx >= emptyOp.getDynamicSizes().size())
+      return failure();
+
+    return emptyOp.getDynamicSizes()[dynamicDimIdx];
+  }
+
+  Value getEncodingDimSource(Operation *op, unsigned resultIndex) const {
+    // tensor.empty is a source operation - it doesn't forward encoding dims.
+    return {};
+  }
+};
+
+/// Fallback reification for any tensor value (including block arguments).
+/// This creates a tensor.dim op as a last resort.
+struct FallbackEncodingDimReification {
+  static FailureOr<Value> reifyEncodingDim(OpBuilder &builder, Location loc,
+                                             Value tensor, unsigned dimIndex) {
+    auto tensorType = dyn_cast<RankedTensorType>(tensor.getType());
+    if (!tensorType)
+      return failure();
+
+    auto encoding =
+        dyn_cast_or_null<IREE::Encoding::EncodingAttr>(tensorType.getEncoding());
+    if (!encoding)
+      return failure();
+
+    // Map encoding dimension to shape dimension
+    auto iterationSizes = encoding.getIterationSizes();
+    if (!iterationSizes || dimIndex >= iterationSizes.size())
+      return failure();
+
+    unsigned operandIndex = encoding.getOperandIndex().getValue().getZExtValue();
+    ArrayRef<int64_t> shape = tensorType.getShape();
+    int64_t shapeDim = -1;
+
+    // Simple mapping for now: encoding dim -> shape dim (works for matmul)
+    if (operandIndex == 0 || operandIndex == 1 || operandIndex == 2) {
+      shapeDim = dimIndex;
+    }
+
+    if (shapeDim < 0 || shapeDim >= static_cast<int64_t>(shape.size()))
+      return failure();
+
+    // If static, return a constant
+    if (!tensorType.isDynamicDim(shapeDim)) {
+      return arith::ConstantIndexOp::create(builder, loc, shape[shapeDim])
+          .getResult();
+    }
+
+    // For dynamic dimensions, create a tensor.dim op
+    return builder.create<tensor::DimOp>(loc, tensor, shapeDim).getResult();
+  }
+};
+
 } // namespace
 
 void registerEncodingExternalModels(DialectRegistry &registry) {
@@ -311,8 +438,9 @@ void registerEncodingExternalModels(DialectRegistry &registry) {
       +[](MLIRContext *ctx, mlir::tensor::TensorDialect *dialect) {
         EncodingCastableOpPropagationInterfaceHelper<
             tensor::CollapseShapeOp, tensor::CastOp>::registerOpInterface(ctx);
-        // EncodingDimReificationInterface for tensor.cast.
+        // EncodingDimReificationInterface for tensor.cast and tensor.empty.
         tensor::CastOp::attachInterface<TensorCastEncodingDimModel>(*ctx);
+        tensor::EmptyOp::attachInterface<TensorEmptyEncodingDimModel>(*ctx);
       });
   registry.addExtension(
       +[](MLIRContext *ctx, mlir::linalg::LinalgDialect *dialect) {

@@ -46,10 +46,10 @@ util.func public @matmul_encoding_dynamic_specialization(%d0: index) -> (index, 
 // CHECK-SAME:    (%[[D0:.+]]: index)
 //
 // LHS tensor: ?x512 with encoding -> specializable_layout with 1 encoding dim
-// The variant layout has ranges <umin = 512, udiv = 256>
+// The variant layout has ranges <umin = 64, udiv = 64>
 // CHECK:         %[[SIZE_LHS:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device>)
 // CHECK-SAME:      tensor<?x512xf32, #iree_encoding.specializable_layout<1,
-// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 512, udiv = 256>]>{{\]\]}}
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 64, udiv = 64>]>{{\]\]}}
 // CHECK-SAME:        {%[[D0]]} : index
 //
 // RHS tensor: 512x1024 (fully static, no dynamic dims to specialize on)
@@ -59,7 +59,7 @@ util.func public @matmul_encoding_dynamic_specialization(%d0: index) -> (index, 
 // Result tensor: ?x1024 with encoding -> specializable_layout with 1 encoding dim
 // CHECK:         %[[SIZE_RES:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device>)
 // CHECK-SAME:      tensor<?x1024xf32, #iree_encoding.specializable_layout<1,
-// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 512, udiv = 256>]>{{\]\]}}
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 64, udiv = 64>]>{{\]\]}}
 // CHECK-SAME:        {%[[D0]]} : index
 //
 // CHECK:         util.return %[[SIZE_LHS]], %[[SIZE_RHS]], %[[SIZE_RES]]
@@ -134,22 +134,22 @@ util.func public @gpu_encoding_dynamic_specialization(%d0: index) -> index {
 
 // With GPU resolver and exactly 1 dynamic dimension:
 // - Gets converted to SpecializableLayoutAttr with 1 variant and fallback
-// - The variant has range <umin = 512, udiv = 256>
+// - The variant has range <umin = 64, udiv = 64>
 // - Both variant and fallback are resolved by the GPU resolver
 // - IMPORTANTLY: The variant and fallback have DIFFERENT tile sizes!
-//   Variant (M=512): innerTileSizes = [32, 16]
+//   Variant (M=64):  innerTileSizes = [16, 16]
 //   Fallback (M=?):  innerTileSizes = [128, 16]
 // CHECK-LABEL: util.func public @gpu_encoding_dynamic_specialization
 // CHECK-SAME:    (%[[D0:.+]]: index)
 // CHECK:         %[[SIZE:.+]] = stream.tensor.sizeof on(#hal.device.affinity<@device_gpu>)
 // The encoding should be specializable_layout with 1 encoding dim
 // CHECK-SAME:      tensor<?x512xf32, #iree_encoding.specializable_layout<1,
-// The variant ranges: M >= 512, divisible by 256
-// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 512, udiv = 256>]>{{\]\]}}
-// The variant layout (GPU resolver) - smaller tiles for M=512
-// CHECK-SAME:        {{\[\[}}#iree_gpu.gpu_encoding_resolver<configuration = {encoding_info = {innerDimsPos = [0, 1], innerTileSizes = [32, 16], outerDimsPerm = [0, 1], swizzle = {expandShape = {{\[\[}}{{\[}}"CrossIntrinsic", 2 : i16{{\]}}, {{\[}}"CrossThread", 16 : i16{{\]\]}}, {{\[\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 4 : i16{{\]\]\]}}, permutation = [0, 3, 1, 2]}}}>
+// The variant ranges: M >= 64, divisible by 64
+// CHECK-SAME:        {{\[\[}}#util<int.assumption.array[<umin = 64, udiv = 64>]>{{\]\]}}
+// The variant layout (GPU resolver) - small tiles for M=64
+// CHECK-SAME:        {{\[\[}}#iree_gpu.gpu_encoding_resolver<configuration = {encoding_info = {innerDimsPos = [0, 1], innerTileSizes = [16, 16], outerDimsPerm = [0, 1], swizzle = {expandShape = {{\[\[}}{{\[}}"CrossThread", 16 : i16{{\]\]}}, {{\[\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 4 : i16{{\]\]\]}}, permutation = [2, 0, 1]}}}>
 // CHECK-SAME:        {{\]\]}}
-// The fallback layout (GPU resolver) - larger tiles for dynamic M
+// The fallback layout (GPU resolver) - large tiles for dynamic M
 // CHECK-SAME:        #iree_gpu.gpu_encoding_resolver<configuration = {encoding_info = {innerDimsPos = [0, 1], innerTileSizes = [128, 16], outerDimsPerm = [0, 1], swizzle = {expandShape = {{\[\[}}{{\[}}"CrossThread", 2 : i16{{\]}}, {{\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 16 : i16{{\]\]}}, {{\[\[}}"CrossIntrinsic", 4 : i16{{\]}}, {{\[}}"CrossThread", 4 : i16{{\]\]\]}}, permutation = [0, 1, 4, 2, 3]}}}>
 // CHECK-SAME:        >>
 // CHECK-SAME:      {%[[D0]]} : index

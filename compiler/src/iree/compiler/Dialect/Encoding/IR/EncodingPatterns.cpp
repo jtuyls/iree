@@ -7,6 +7,7 @@
 #include "iree/compiler/Dialect/Encoding/IR/EncodingPatterns.h"
 
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -135,6 +136,70 @@ struct ReifyEncodingDimThroughDPS : public OpRewritePattern<EncodingDimOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// Fallback pattern: Reify encoding_dim using tensor.dim
+//===----------------------------------------------------------------------===//
+
+/// Fallback pattern that resolves iree_encoding.encoding_dim to tensor.dim
+/// for sources that aren't OpResults (e.g., block arguments).
+///
+/// Before:
+///   %dim = iree_encoding.encoding_dim %arg0[0] : tensor<?x?xf32, #enc>
+///
+/// After:
+///   %dim = tensor.dim %arg0, %c0 : tensor<?x?xf32, #enc>
+///
+struct ReifyEncodingDimToTensorDim : public OpRewritePattern<EncodingDimOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(EncodingDimOp dimOp,
+                                PatternRewriter &rewriter) const override {
+    // Only handle non-OpResult sources (e.g., block arguments).
+    if (isa<OpResult>(dimOp.getSource())) {
+      return failure();
+    }
+
+    auto tensorType = dyn_cast<RankedTensorType>(dimOp.getSource().getType());
+    if (!tensorType)
+      return failure();
+
+    auto encoding =
+        dyn_cast_or_null<IREE::Encoding::EncodingAttr>(tensorType.getEncoding());
+    if (!encoding)
+      return failure();
+
+    // Map encoding dimension to shape dimension
+    int64_t encodingDimIndex = dimOp.getConstantIndex();
+    auto iterationSizes = encoding.getIterationSizes();
+    if (!iterationSizes || encodingDimIndex >= static_cast<int64_t>(iterationSizes.size()))
+      return failure();
+
+    unsigned operandIndex = encoding.getOperandIndex().getValue().getZExtValue();
+    int64_t shapeDim = -1;
+
+    // Simple mapping: encoding dim -> shape dim (works for matmul)
+    // For matmul: LHS (operand 0) = [M, K], RHS (operand 1) = [N, K], Result (operand 2) = [M, N]
+    if (operandIndex == 0 || operandIndex == 1 || operandIndex == 2) {
+      shapeDim = encodingDimIndex;
+    }
+
+    if (shapeDim < 0 || shapeDim >= tensorType.getRank())
+      return failure();
+
+    // If static, return a constant
+    if (!tensorType.isDynamicDim(shapeDim)) {
+      rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(
+          dimOp, tensorType.getDimSize(shapeDim));
+      return success();
+    }
+
+    // For dynamic dimensions, create a tensor.dim op
+    rewriter.replaceOpWithNewOp<tensor::DimOp>(dimOp, dimOp.getSource(),
+                                                shapeDim);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Pattern population
 //===----------------------------------------------------------------------===//
 
@@ -146,6 +211,9 @@ void populateEncodingDimReificationPatterns(RewritePatternSet &patterns) {
   // Explicit pattern for DPS ops (interface-based approach not feasible for
   // DestinationStyleOpInterface since it's an interface, not a concrete op).
   patterns.add<ReifyEncodingDimThroughDPS>(patterns.getContext());
+
+  // Fallback pattern for block arguments and other non-OpResult sources.
+  patterns.add<ReifyEncodingDimToTensorDim>(patterns.getContext());
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding

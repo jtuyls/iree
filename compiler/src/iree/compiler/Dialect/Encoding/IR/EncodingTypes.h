@@ -128,6 +128,15 @@ struct SpecializationInfo {
   unsigned numEncodingDims;
 };
 
+/// An operand dimension to specialize on.
+/// Returned by DynamicLayoutSpecializerAttr::getSpecializationOperands().
+struct SpecializationOperand {
+  /// The SSA value (operand) to get the dimension from.
+  Value operand;
+  /// Which dimension index in the operand's shape.
+  unsigned dimIndex;
+};
+
 } // namespace mlir::iree_compiler::IREE::Encoding
 
 // clang-format off

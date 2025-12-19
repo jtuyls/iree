@@ -13,6 +13,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
@@ -544,11 +545,11 @@ std::optional<SpecializationInfo> EncodingAttr::getSpecializationInfo() const {
   info.fallbackEncoding = *this;
 
   // Create one specialization variant for "large" sizes.
-  // The variant covers sizes >= 512, divisible by 256.
-  // We create a new EncodingAttr with the dynamic dimension replaced by the
-  // expected minimum size (512) so the layout resolver can pick optimal tiles.
-  constexpr int64_t kLargeThreshold = 512;
-  constexpr int64_t kDivisor = 256;
+  // The variant covers sizes >= 64, divisible by 64.
+  // The variant encoding is the same as the original (with dynamic dimension).
+  // The layout resolver will use the assumption's umin value for tile selection.
+  constexpr int64_t kLargeThreshold = 64;
+  constexpr int64_t kDivisor = 64;
 
   SpecializationVariant variant;
 
@@ -561,22 +562,10 @@ std::optional<SpecializationInfo> EncodingAttr::getSpecializationInfo() const {
   variant.ranges =
       IREE::Util::IntAssumptionArrayAttr::get(getContext(), dimRanges);
 
-  // Create a variant EncodingAttr with the dynamic dimension replaced by
-  // the expected minimum size. This allows the layout resolver to select
-  // tile sizes optimized for large inputs.
-  unsigned dynamicDimIdx = dynamicDims[0];
-  SmallVector<int64_t> variantIterationSizes = getIterationSizesArray();
-  variantIterationSizes[dynamicDimIdx] = kLargeThreshold;
-
-  // Get element types from the ArrayAttr.
-  SmallVector<Type> elementTypes =
-      llvm::map_to_vector(getElementTypes().getValue(), [](Attribute a) {
-        return cast<TypeAttr>(a).getValue();
-      });
-
-  variant.encoding = EncodingAttr::get(getContext(), getOperandIndex().getInt(),
-                                       getOpType().getValue(), elementTypes,
-                                       getRootMaps(), variantIterationSizes);
+  // The variant encoding is the same as the original (keeps dynamic dimension).
+  // The layout resolver will extract the assumption from its config and use
+  // the umin value for tile size selection.
+  variant.encoding = *this;
 
   info.variants.push_back(variant);
 
@@ -590,6 +579,41 @@ SmallVector<unsigned> EncodingAttr::getSpecializationDimensions() const {
 
   ArrayAttr iterationSizes = getIterationSizes();
   return getDynamicDimensionIndices(iterationSizes);
+}
+
+llvm::SmallVector<SpecializationOperand>
+EncodingAttr::getSpecializationOperands(Operation *op) const {
+  llvm::SmallVector<SpecializationOperand> result;
+
+  if (!supportsSpecialization()) {
+    return result;
+  }
+
+  // For EncodingAttr, we specialize on dynamic encoding dimensions of
+  // any result that has this encoding.
+  for (OpResult opResult : op->getResults()) {
+    auto resultType = dyn_cast<RankedTensorType>(opResult.getType());
+    if (!resultType || !resultType.getEncoding())
+      continue;
+
+    auto resultEncoding = dyn_cast<EncodingAttr>(resultType.getEncoding());
+    if (!resultEncoding)
+      continue;
+
+    // Check if this result's encoding matches the specializable encoding
+    // we're looking for (same iteration_sizes, op_type, etc.)
+    if (resultEncoding.getOpType() != getOpType() ||
+        resultEncoding.getIterationSizes() != getIterationSizes())
+      continue;
+
+    // Add specialization markers for each dynamic encoding dimension.
+    auto dynamicDims = getDynamicDimensionIndices(resultEncoding.getIterationSizes());
+    for (unsigned dimIdx : dynamicDims) {
+      result.push_back({opResult, dimIdx});
+    }
+  }
+
+  return result;
 }
 
 //===---------------------------------------------------------------------===//
@@ -961,6 +985,32 @@ DynamicLayoutTestAttr::getSpecializationDimensions() const {
     result.push_back(dimIdx);
   }
   return result;
+}
+
+llvm::SmallVector<SpecializationOperand>
+DynamicLayoutTestAttr::getSpecializationOperands(Operation *op) const {
+  llvm::SmallVector<SpecializationOperand> operands;
+  
+  if (!supportsSpecialization()) {
+    return operands;
+  }
+
+  // For the test attribute, we specialize on all encoding dimensions of
+  // any result that has this encoding.
+  for (OpResult result : op->getResults()) {
+    auto resultType = dyn_cast<RankedTensorType>(result.getType());
+    if (!resultType || resultType.getEncoding() != *this) {
+      continue;
+    }
+
+    // Add a specialization operand for each encoding dimension.
+    unsigned numDims = getNumDims();
+    for (unsigned dimIdx = 0; dimIdx < numDims; ++dimIdx) {
+      operands.push_back({result, dimIdx});
+    }
+  }
+  
+  return operands;
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding

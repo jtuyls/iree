@@ -663,6 +663,28 @@ def IREEEncoding_DynamicLayoutSpecializerAttr :
       /*defaultImplementation=*/[{
         return {};
       }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the operands and dimension indices that need specialization
+        markers for the given operation.
+
+        This is used by the marker insertion pass to insert util.specialize
+        ops for each operand dimension that needs runtime specialization.
+        
+        For example, for a matmul with encoded tensors, this might return
+        the LHS operand (operand_index=0) and dimension 0 (M dimension).
+
+        Returns an empty vector if specialization is not supported or the
+        operation is not a valid user of this encoding.
+      }],
+      /*retTy=*/"::llvm::SmallVector<::mlir::iree_compiler::IREE::Encoding::SpecializationOperand>",
+      /*methodName=*/"getSpecializationOperands",
+      /*args=*/(ins "::mlir::Operation*":$op),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return {};
+      }]
     >
   ];
 

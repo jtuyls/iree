@@ -122,6 +122,7 @@ def EncodingAttr :
         "supportsSpecialization",
         "getSpecializationInfo",
         "getSpecializationDimensions",
+        "getSpecializationOperands",
       ]>
     ]> {
   let mnemonic = "encoding";
@@ -475,6 +476,7 @@ def DynamicLayoutTestAttr :
         "supportsSpecialization",
         "getSpecializationInfo",
         "getSpecializationDimensions",
+        "getSpecializationOperands",
       ]>
     ]> {
   let mnemonic = "dynamic_layout_test";
