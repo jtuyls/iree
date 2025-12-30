@@ -23,17 +23,26 @@ def LLMAssistedTransformPass :
   }];
   let options = [
     Option<"backendType", "backend", "std::string", "\"ollama\"",
-      "LLM backend type: 'ollama' (default)">,
+      "LLM backend type: 'ollama' or 'iree'">,
     Option<"endpoint", "endpoint", "std::string", "\"http://localhost:11434\"",
-      "LLM backend endpoint URL">,
+      "LLM backend endpoint URL (for ollama)">,
     Option<"model", "model", "std::string", "\"qwen2.5-coder:7b\"",
-      "Model name to use for generation">,
+      "Model name to use for generation (for ollama)">,
     Option<"taskDescription", "task", "std::string", "\"\"",
       "Task description for the LLM (what transformation to apply)">,
     Option<"dryRun", "dry-run", "bool", "false",
       "If true, only print the LLM suggestion without applying it">,
     Option<"verbose", "verbose", "bool", "false",
       "Enable verbose output for debugging">,
+    // IREE backend options
+    Option<"ireeVmfbPath", "iree-vmfb", "std::string", "\"\"",
+      "Path to IREE compiled model (.vmfb) for IREE backend">,
+    Option<"ireeIrpaPath", "iree-irpa", "std::string", "\"\"",
+      "Path to IREE parameter archive (.irpa) for IREE backend">,
+    Option<"ireeTokenizerPath", "iree-tokenizer", "std::string", "\"\"",
+      "Path to tokenizer model for IREE backend">,
+    Option<"ireeDevice", "iree-device", "std::string", "\"local-task\"",
+      "IREE device URI (e.g., 'local-task', 'hip')">,
   ];
 }
 

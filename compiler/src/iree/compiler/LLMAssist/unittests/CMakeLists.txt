@@ -54,3 +54,28 @@ iree_cc_test(
     iree::testing::gtest_main
 )
 
+iree_cc_test(
+  NAME
+    KVCacheManagerTest
+  SRCS
+    "KVCacheManagerTest.cpp"
+  DEPS
+    gmock
+    gtest
+    iree::compiler::LLMAssist::KVCache
+    iree::hal::drivers::local_task::registration
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    IREEBackendTest
+  SRCS
+    "IREEBackendTest.cpp"
+  DEPS
+    gmock
+    gtest
+    iree::compiler::LLMAssist::IREEBackend
+    iree::testing::gtest_main
+)
+

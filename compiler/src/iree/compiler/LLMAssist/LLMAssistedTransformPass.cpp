@@ -6,6 +6,7 @@
 
 #include "iree/compiler/LLMAssist/Backend/LLMBackend.h"
 #include "iree/compiler/LLMAssist/Backend/OllamaBackend.h"
+#include "iree/compiler/LLMAssist/Backend/IREEBackend.h"
 #include "iree/compiler/LLMAssist/IR/IRParser.h"
 #include "iree/compiler/LLMAssist/IR/IRSerializer.h"
 #include "iree/compiler/LLMAssist/Passes.h"
@@ -36,8 +37,15 @@ public:
     if (verbose) {
       llvm::outs() << "LLMAssistedTransformPass: Starting\n";
       llvm::outs() << "  Backend: " << backendType << "\n";
-      llvm::outs() << "  Endpoint: " << endpoint << "\n";
-      llvm::outs() << "  Model: " << model << "\n";
+      if (backendType == "ollama") {
+        llvm::outs() << "  Endpoint: " << endpoint << "\n";
+        llvm::outs() << "  Model: " << model << "\n";
+      } else if (backendType == "iree") {
+        llvm::outs() << "  VMFB: " << ireeVmfbPath << "\n";
+        llvm::outs() << "  IRPA: " << ireeIrpaPath << "\n";
+        llvm::outs() << "  Tokenizer: " << ireeTokenizerPath << "\n";
+        llvm::outs() << "  Device: " << ireeDevice << "\n";
+      }
       llvm::outs() << "  Task: "
                    << (taskDescription.empty() ? "(none)"
                                                : taskDescription.c_str())
@@ -49,9 +57,30 @@ public:
     std::unique_ptr<LLMBackend> backend;
     if (backendType == "ollama") {
       backend = createOllamaBackend(endpoint);
+    } else if (backendType == "iree") {
+      // Validate required IREE backend options.
+      if (ireeVmfbPath.empty() || ireeTokenizerPath.empty()) {
+        emitError(module.getLoc())
+            << "IREE backend requires --iree-vmfb and --iree-tokenizer options";
+        return signalPassFailure();
+      }
+      IREEBackendConfig ireeConfig;
+      ireeConfig.vmfbPath = ireeVmfbPath.getValue();
+      ireeConfig.irpaPath = ireeIrpaPath.getValue();
+      ireeConfig.tokenizerPath = ireeTokenizerPath.getValue();
+      ireeConfig.deviceUri = ireeDevice.getValue();
+      
+      auto backendOrErr = IREEBackend::create(ireeConfig);
+      if (!backendOrErr) {
+        llvm::errs() << "LLMAssistedTransformPass: Failed to create IREE backend: "
+                     << llvm::toString(backendOrErr.takeError()) << "\n";
+        return;
+      }
+      backend = std::move(*backendOrErr);
     } else {
       emitError(module.getLoc())
-          << "Unknown LLM backend type: " << backendType;
+          << "Unknown LLM backend type: " << backendType
+          << " (supported: 'ollama', 'iree')";
       return signalPassFailure();
     }
 

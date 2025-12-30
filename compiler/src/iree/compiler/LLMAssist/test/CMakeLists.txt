@@ -15,6 +15,7 @@ iree_lit_test_suite(
     lit
   SRCS
     "llm_assisted_transform.mlir"
+    "llm_iree_backend_dry_run.mlir"
     "llm_prompt_dryrun.mlir"
     "llm_transform_e2e.mlir"
   TOOLS
