@@ -752,10 +752,14 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
   return allTokens;
 }
 
+// Set to true to enable detailed prefill/decode debug output
+static const bool kEnableDebugOutput = false;
+
 llvm::Expected<int64_t>
 IREEBackend::runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen) {
   auto prefillStart = std::chrono::high_resolution_clock::now();
-  llvm::errs() << "IREEBackend::runPrefill: Starting with seqLen=" << seqLen << "\n";
+  if (kEnableDebugOutput)
+    llvm::errs() << "IREEBackend::runPrefill: Starting with seqLen=" << seqLen << "\n";
   
   iree_status_t status = iree_ok_status();
   iree_hal_allocator_t *allocator = iree_hal_device_allocator(device_);
