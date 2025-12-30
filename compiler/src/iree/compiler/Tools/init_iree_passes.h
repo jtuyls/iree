@@ -35,6 +35,10 @@
 #include "iree/compiler/Pipelines/Pipelines.h"
 #include "iree/compiler/Preprocessing/Passes.h"
 
+#ifdef IREE_HAVE_LLM_ASSIST
+#include "iree/compiler/LLMAssist/Passes.h"
+#endif // IREE_HAVE_LLM_ASSIST
+
 #ifdef IREE_HAVE_C_OUTPUT_FORMAT
 // TODO: Remove these once rolled up into explicit registration.
 #include "iree/compiler/Dialect/VM/Conversion/VMToEmitC/ConvertVMToEmitC.h"
@@ -69,6 +73,11 @@ inline void registerAllIreePasses() {
   IREE::VM::registerVMAnalysisTestPasses();
   IREE::VMVX::registerVMVXPasses();
   registerIREEVMTransformPassPipeline();
+
+  // LLM-assisted passes (experimental, requires IREE_ENABLE_LLM_ASSIST=ON).
+#ifdef IREE_HAVE_LLM_ASSIST
+  LLMAssist::registerLLMAssistPasses();
+#endif // IREE_HAVE_LLM_ASSIST
 
   // We have some dangling passes that don't use explicit
   // registration and that we need to force instantiation

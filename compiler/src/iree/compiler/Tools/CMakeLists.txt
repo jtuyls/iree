@@ -17,6 +17,12 @@ if(IREE_EMBEDDED_RELEASE_INFO)
   list(APPEND IREE_VERSION_TARGET_COPTS "-DIREE_RELEASE_VERSION=\"${IREE_RELEASE_VERSION}\"")
 endif()
 
+# Collect optional LLMAssist dependencies.
+set(_LLMASSIST_DEPS "")
+if(IREE_ENABLE_LLM_ASSIST)
+  list(APPEND _LLMASSIST_DEPS iree::compiler::LLMAssist::LLMAssist)
+endif()
+
 iree_cc_library(
   NAME
     init_iree_passes_and_dialects
@@ -68,6 +74,7 @@ iree_cc_library(
     iree::compiler::Pipelines
     iree::compiler::Preprocessing::Passes
     iree::compiler::Preprocessing::TransformExtensions::PreprocessingExtensions
+    ${_LLMASSIST_DEPS}
   PUBLIC
 )
 

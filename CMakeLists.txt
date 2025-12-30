@@ -108,6 +108,9 @@ option(IREE_BUILD_ALL_CHECK_TEST_MODULES "Builds all modules for iree_check_test
 
 option(IREE_ENABLE_COLLECTIVE_RUNTIME_TESTS "Enable runtime tests for collective operations." OFF)
 
+# Experimental: LLM-assisted compiler passes
+option(IREE_ENABLE_LLM_ASSIST "Enables experimental LLM-assisted compiler passes (requires HTTP client)" OFF)
+
 # For development, builds LLVM (and in the future) the whole compiler as
 # individual shared libraries similar to if passing -DBUILD_SHARED_LIBS=ON
 # to a standalone LLVM build. This can dramatically reduce linking time and
