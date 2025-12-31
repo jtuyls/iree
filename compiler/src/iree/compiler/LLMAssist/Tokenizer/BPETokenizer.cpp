@@ -131,12 +131,26 @@ llvm::Error BPETokenizer::loadFromJson(llvm::StringRef path) {
   llvm::errs() << "BPETokenizer: Loaded " << vocab_.size() << " vocab entries\n";
 
   // Load merge rules
+  // Merges can be either:
+  //   - Array of strings: ["Ġ Ġ", "i n", ...]
+  //   - Array of pairs: [["Ġ", "Ġ"], ["i", "n"], ...]
   auto *merges = model->getArray("merges");
   if (merges) {
     int rank = 0;
     for (const auto &merge : *merges) {
       if (auto mergeStr = merge.getAsString()) {
+        // String format: "token1 token2"
         mergeRanks_[mergeStr->str()] = rank++;
+      } else if (auto *mergePair = merge.getAsArray()) {
+        // Pair format: ["token1", "token2"]
+        if (mergePair->size() == 2) {
+          auto first = (*mergePair)[0].getAsString();
+          auto second = (*mergePair)[1].getAsString();
+          if (first && second) {
+            std::string mergeKey = first->str() + " " + second->str();
+            mergeRanks_[mergeKey] = rank++;
+          }
+        }
       }
     }
     llvm::errs() << "BPETokenizer: Loaded " << mergeRanks_.size()
@@ -293,6 +307,64 @@ std::vector<int64_t> BPETokenizer::bpeEncode(const std::string &chunk) const {
 
 std::vector<int64_t> BPETokenizer::encode(llvm::StringRef text) const {
   std::vector<int64_t> result;
+  
+  // First, find and extract special tokens (like <|begin_of_text|>)
+  // These need to be tokenized as single tokens, not split by the regex
+  std::string remaining = text.str();
+  std::vector<std::pair<size_t, std::pair<std::string, int64_t>>> specialMatches;
+  
+  // Find all special token occurrences
+  for (const auto &entry : vocab_) {
+    const std::string &token = entry.first;
+    // Check if it's a special token (starts with <| and ends with |>)
+    if (token.size() >= 4 && token.substr(0, 2) == "<|" && 
+        token.substr(token.size() - 2) == "|>") {
+      size_t pos = 0;
+      while ((pos = remaining.find(token, pos)) != std::string::npos) {
+        specialMatches.push_back({pos, {token, entry.second}});
+        pos += token.size();
+      }
+    }
+  }
+  
+  // Sort by position
+  std::sort(specialMatches.begin(), specialMatches.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+  
+  // Process text with special tokens extracted
+  size_t lastEnd = 0;
+  for (const auto &match : specialMatches) {
+    size_t pos = match.first;
+    const std::string &token = match.second.first;
+    int64_t tokenId = match.second.second;
+    
+    // Skip if this overlaps with a previous match
+    if (pos < lastEnd) continue;
+    
+    // Process text before this special token
+    if (pos > lastEnd) {
+      std::string segment = remaining.substr(lastEnd, pos - lastEnd);
+      auto segmentIds = encodeSegment(segment, lastEnd == 0);
+      result.insert(result.end(), segmentIds.begin(), segmentIds.end());
+    }
+    
+    // Add the special token
+    result.push_back(tokenId);
+    lastEnd = pos + token.size();
+  }
+  
+  // Process remaining text after last special token
+  if (lastEnd < remaining.size()) {
+    std::string segment = remaining.substr(lastEnd);
+    auto segmentIds = encodeSegment(segment, lastEnd == 0);
+    result.insert(result.end(), segmentIds.begin(), segmentIds.end());
+  }
+
+  return result;
+}
+
+std::vector<int64_t> BPETokenizer::encodeSegment(const std::string &text, bool isFirst) const {
+  std::vector<int64_t> result;
 
   // Pre-tokenize into chunks
   std::vector<std::string> chunks = preTokenize(text);
@@ -300,7 +372,7 @@ std::vector<int64_t> BPETokenizer::encode(llvm::StringRef text) const {
   // Process chunks, handling spaces correctly
   // In GPT-style tokenizers, spaces are prepended to the following token as Ġ
   bool pendingSpace = false;
-  bool isFirst = true;
+  bool firstChunk = isFirst;
   
   for (const auto &chunk : chunks) {
     // Check if this chunk is purely whitespace
@@ -321,7 +393,7 @@ std::vector<int64_t> BPETokenizer::encode(llvm::StringRef text) const {
     // Build the token with appropriate space prefix
     std::string processedChunk;
     
-    if (pendingSpace || (!isFirst && !chunk.empty())) {
+    if (pendingSpace || (!firstChunk && !chunk.empty())) {
       // Add Ġ prefix (U+0120 = 0xC4 0xA0 in UTF-8)
       processedChunk = "\xC4\xA0" + chunk;
     } else {
@@ -329,7 +401,7 @@ std::vector<int64_t> BPETokenizer::encode(llvm::StringRef text) const {
     }
     
     pendingSpace = false;
-    isFirst = false;
+    firstChunk = false;
 
     if (!processedChunk.empty()) {
       auto ids = bpeEncode(processedChunk);

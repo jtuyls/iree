@@ -31,7 +31,7 @@ PromptBuilder::PromptBuilder() {
 
 std::string PromptBuilder::getSystemPrompt() {
   // Keep prompt short to stay under 512 token decode limit in sharktank models
-  return R"(Transform MLIR code. Output valid MLIR in a ```mlir block. Preserve function names and types.)";
+  return R"(You are an MLIR compiler expert. Transform MLIR code as requested. Output only valid MLIR code in a ```mlir block.)";
 }
 
 std::string PromptBuilder::buildTransformPrompt(llvm::StringRef irText,
@@ -39,30 +39,23 @@ std::string PromptBuilder::buildTransformPrompt(llvm::StringRef irText,
   std::string prompt;
   llvm::raw_string_ostream os(prompt);
 
-  // System prompt.
-  os << getSystemPrompt() << "\n\n";
+  // Use Llama 3 Instruct format for best results with instruction-tuned models
+  // Format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>
+  //         <|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>
+  //         <|start_header_id|>assistant<|end_header_id|>\n\n
+  
+  // System prompt
+  os << "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n";
+  os << getSystemPrompt();
+  os << "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n";
 
-  // Few-shot examples if enabled.
-  if (config.includeFewShot && !fewShotExamples_.empty()) {
-    os << formatFewShotExamples(config.maxFewShotExamples) << "\n";
-  }
-
-  // Task description.
-  os << "## Task:\n";
-  os << config.taskDescription << "\n\n";
-
-  // Input IR.
-  os << "## Input MLIR:\n";
+  // User prompt with task and input
+  os << config.taskDescription << ":\n\n";
   os << "```mlir\n";
   os << irText << "\n";
-  os << "```\n\n";
-
-  // Request output.
-  os << "## Output the transformed MLIR:\n";
-
-  if (config.requestExplanation) {
-    os << "(First briefly explain your changes, then provide the code)\n";
-  }
+  os << "```";
+  
+  os << "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
 
   return prompt;
 }

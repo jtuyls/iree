@@ -72,6 +72,9 @@ private:
   /// Returns -1 if the merge doesn't exist.
   int getMergeRank(const std::string &token1, const std::string &token2) const;
 
+  /// Encode a segment of text (without special tokens).
+  std::vector<int64_t> encodeSegment(const std::string &text, bool isFirst) const;
+
   // Vocabulary: token string -> ID
   std::unordered_map<std::string, int64_t> vocab_;
 

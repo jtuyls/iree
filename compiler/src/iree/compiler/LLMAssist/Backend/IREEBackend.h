@@ -57,6 +57,17 @@ struct LLMModelConfig {
   int64_t pageSize = 0; // 0 means auto-calculate
   int contextLength = 4096;
   std::string modelType = "llama";
+  
+  // Incremental model specific fields
+  int prefillLen = 512;       // Fixed prefill length
+  int maxCacheLen = 512;      // Maximum cache length
+  int attentionMaskLen = 513; // prefillLen + 1
+  
+  /// Check if this is an incremental model (not paged attention)
+  bool isIncremental() const {
+    return modelType == "llama_incremental" || 
+           modelType == "tinyllama_incremental";
+  }
 
   /// Load configuration from a JSON file.
   static llvm::Expected<LLMModelConfig> loadFromFile(llvm::StringRef path);
@@ -137,6 +148,7 @@ private:
   iree_vm_function_t prefillFn_;
   iree_vm_function_t decodeFn_;
 
+  // ============ Paged attention cache (for paged models) ============
   // Flat KV-cache buffer (matches Python test approach)
   // Shape: [deviceBlockCount, pageSize] where pageSize = layers*2*heads*stride*dim
   iree_hal_buffer_t *cacheBuffer_ = nullptr;
@@ -145,7 +157,7 @@ private:
   int64_t pageSize_ = 0;  // Computed from model config
   int blockSeqStride_ = 32;
 
-  // Pre-allocated decode input buffers and views (for performance)
+  // Pre-allocated decode input buffers and views (for paged attention)
   iree_hal_buffer_t *decodeTokenBuffer_ = nullptr;
   iree_hal_buffer_view_t *decodeTokenView_ = nullptr;
   iree_hal_buffer_t *decodeSeqLenBuffer_ = nullptr;
@@ -155,6 +167,20 @@ private:
   iree_hal_buffer_t *decodePageTableBuffer_ = nullptr;
   int decodePageTableCapacity_ = 0;  // Current capacity in pages
   int currentNumPages_ = 0;  // Current page table size
+  
+  // ============ Incremental model cache (for non-paged models) ============
+  // Cache K and V: [layers, 1, heads, max_cache_len, head_dim]
+  iree_hal_buffer_t *cacheKBuffer_ = nullptr;
+  iree_hal_buffer_view_t *cacheKView_ = nullptr;
+  iree_hal_buffer_t *cacheVBuffer_ = nullptr;
+  iree_hal_buffer_view_t *cacheVView_ = nullptr;
+  
+  // Attention mask buffer: [1, max_cache_len + 1]
+  iree_hal_buffer_t *attentionMaskBuffer_ = nullptr;
+  iree_hal_buffer_view_t *attentionMaskView_ = nullptr;
+  
+  // Current sequence position for incremental decode
+  int currentSeqPos_ = 0;
 
   // Host allocator
   iree_allocator_t hostAllocator_;

@@ -118,6 +118,22 @@ LLMModelConfig::loadFromFile(llvm::StringRef path) {
       config.blockSeqStride = *v;
     if (auto s = obj->getString("model_type"))
       config.modelType = s->str();
+    
+    // Incremental model specific fields
+    if (auto v = obj->getInteger("prefill_len"))
+      config.prefillLen = *v;
+    if (auto v = obj->getInteger("max_cache_len"))
+      config.maxCacheLen = *v;
+    if (auto v = obj->getInteger("attention_mask_len"))
+      config.attentionMaskLen = *v;
+    
+    // Also check llm_assist section for incremental fields
+    if (auto *llmAssist = obj->getObject("llm_assist")) {
+      if (auto v = llmAssist->getInteger("prefill_len"))
+        config.prefillLen = *v;
+      if (auto v = llmAssist->getInteger("max_cache_len"))
+        config.maxCacheLen = *v;
+    }
   }
 
   return config;
@@ -451,58 +467,90 @@ llvm::Error IREEBackend::initialize() {
                                    msg.c_str());
   }
 
-  // Look up prefill and decode functions
-  status = iree_vm_context_resolve_function(
-      context_, iree_make_cstring_view("module.prefill_bs1"), &prefillFn_);
-  if (!iree_status_is_ok(status)) {
-    // Try alternative names
-    iree_status_free(status);
+  // Look up prefill and decode functions based on model type
+  if (modelConfig_.isIncremental()) {
+    // Incremental model: uses 'prefill' and 'decode_step'
+    llvm::errs() << "IREEBackend::initialize: Looking up incremental model functions\n";
     status = iree_vm_context_resolve_function(
         context_, iree_make_cstring_view("module.prefill"), &prefillFn_);
-  }
-  if (!iree_status_is_ok(status)) {
-    auto msg = formatStatus(status);
-    iree_status_free(status);
-    return llvm::createStringError(std::errc::io_error,
-                                   "Failed to find prefill function: %s",
-                                   msg.c_str());
-  }
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to find prefill function: %s",
+                                     msg.c_str());
+    }
 
-  status = iree_vm_context_resolve_function(
-      context_, iree_make_cstring_view("module.decode_bs1"), &decodeFn_);
-  if (!iree_status_is_ok(status)) {
-    iree_status_free(status);
     status = iree_vm_context_resolve_function(
-        context_, iree_make_cstring_view("module.decode"), &decodeFn_);
-  }
-  if (!iree_status_is_ok(status)) {
-    auto msg = formatStatus(status);
-    iree_status_free(status);
-    return llvm::createStringError(std::errc::io_error,
-                                   "Failed to find decode function: %s",
-                                   msg.c_str());
-  }
-
-  // Initialize flat KV-cache buffer (matches Python test approach)
-  blockSeqStride_ = modelConfig_.blockSeqStride;
-  deviceBlockCount_ = modelConfig_.deviceBlockCount;
-  
-  // Use page_size from config if provided, otherwise calculate
-  if (modelConfig_.pageSize > 0) {
-    pageSize_ = modelConfig_.pageSize;
+        context_, iree_make_cstring_view("module.decode_step"), &decodeFn_);
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to find decode_step function: %s",
+                                     msg.c_str());
+    }
   } else {
-    // Default calculation: numLayers * 2 * numKVHeads * blockSeqStride * headDim
-    pageSize_ = static_cast<int64_t>(modelConfig_.numLayers) * 2 *
-                static_cast<int64_t>(modelConfig_.numKVHeads) *
-                static_cast<int64_t>(blockSeqStride_) *
-                static_cast<int64_t>(modelConfig_.headDim);
+    // Paged attention model: uses 'prefill_bs1' and 'decode_bs1'
+    llvm::errs() << "IREEBackend::initialize: Looking up paged attention functions\n";
+    status = iree_vm_context_resolve_function(
+        context_, iree_make_cstring_view("module.prefill_bs1"), &prefillFn_);
+    if (!iree_status_is_ok(status)) {
+      iree_status_free(status);
+      status = iree_vm_context_resolve_function(
+          context_, iree_make_cstring_view("module.prefill"), &prefillFn_);
+    }
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to find prefill function: %s",
+                                     msg.c_str());
+    }
+
+    status = iree_vm_context_resolve_function(
+        context_, iree_make_cstring_view("module.decode_bs1"), &decodeFn_);
+    if (!iree_status_is_ok(status)) {
+      iree_status_free(status);
+      status = iree_vm_context_resolve_function(
+          context_, iree_make_cstring_view("module.decode"), &decodeFn_);
+    }
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to find decode function: %s",
+                                     msg.c_str());
+    }
   }
 
-  llvm::errs() << "IREEBackend::initialize: Initializing cache...\n";
-  if (auto err = initializeCache()) {
-    return err;
+  // Initialize cache based on model type
+  if (modelConfig_.isIncremental()) {
+    llvm::errs() << "IREEBackend::initialize: Setting up incremental model cache\n";
+    // For incremental models, we don't use the paged cache
+    // Cache is initialized per-invocation with the right shapes
+  } else {
+    // Initialize flat KV-cache buffer (matches Python test approach)
+    blockSeqStride_ = modelConfig_.blockSeqStride;
+    deviceBlockCount_ = modelConfig_.deviceBlockCount;
+    
+    // Use page_size from config if provided, otherwise calculate
+    if (modelConfig_.pageSize > 0) {
+      pageSize_ = modelConfig_.pageSize;
+    } else {
+      // Default calculation: numLayers * 2 * numKVHeads * blockSeqStride * headDim
+      pageSize_ = static_cast<int64_t>(modelConfig_.numLayers) * 2 *
+                  static_cast<int64_t>(modelConfig_.numKVHeads) *
+                  static_cast<int64_t>(blockSeqStride_) *
+                  static_cast<int64_t>(modelConfig_.headDim);
+    }
+
+    llvm::errs() << "IREEBackend::initialize: Initializing paged cache...\n";
+    if (auto err = initializeCache()) {
+      return err;
+    }
+    llvm::errs() << "IREEBackend::initialize: Paged cache initialized\n";
   }
-  llvm::errs() << "IREEBackend::initialize: Cache initialized successfully\n";
 
   initialized_ = true;
   llvm::errs() << "IREEBackend::initialize: Complete!\n";
@@ -722,6 +770,11 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
   std::vector<int64_t> allTokens(promptTokens.begin(), promptTokens.end());
   int seqLen = static_cast<int>(promptTokens.size());
 
+  // Use appropriate max sequence length based on model type
+  int maxSeqLen = modelConfig_.isIncremental() 
+      ? modelConfig_.maxCacheLen 
+      : modelConfig_.contextLength;
+
   // Prefill phase
   auto nextTokenOrErr = runPrefill(promptTokens, seqLen);
   if (!nextTokenOrErr) {
@@ -733,8 +786,6 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
 
   // Decode loop
   int currentSeqLen = seqLen + 1; // After prefill, we've added one token
-  // Use model's context length from config (2048 for this model)
-  int maxSeqLen = modelConfig_.contextLength;
   
   for (int i = 0; i < maxNewTokens - 1; ++i) {
     // Check for EOS
@@ -751,7 +802,8 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
     }
 
     // Decode next token
-    // startPos = currentSeqLen - 1 (position of the token we just added)
+    // For incremental models: seqLen = current position to decode at
+    // For paged models: startPos = currentSeqLen - 1 (position of the token we just added)
     nextTokenOrErr = runDecode(nextToken, currentSeqLen, currentSeqLen - 1);
     if (!nextTokenOrErr) {
       return nextTokenOrErr.takeError();
@@ -770,11 +822,26 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
 // Set to true to enable detailed prefill/decode debug output
 static const bool kEnableDebugOutput = true;
 
+// Forward declarations for incremental model methods
+llvm::Expected<int64_t>
+runPrefillIncremental(IREEBackend *backend, llvm::ArrayRef<int64_t> tokens, int seqLen,
+                      iree_vm_context_t *context, iree_vm_function_t &prefillFn,
+                      iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                      const LLMModelConfig &config,
+                      iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView);
+
 llvm::Expected<int64_t>
 IREEBackend::runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen) {
   auto prefillStart = std::chrono::high_resolution_clock::now();
   if (kEnableDebugOutput)
     llvm::errs() << "IREEBackend::runPrefill: Starting with seqLen=" << seqLen << "\n";
+  
+  // Dispatch to incremental model path if needed
+  if (modelConfig_.isIncremental()) {
+    return runPrefillIncremental(this, tokens, seqLen, context_, prefillFn_,
+                                 device_, hostAllocator_, modelConfig_,
+                                 cacheKView_, cacheVView_);
+  }
   
   iree_status_t status = iree_ok_status();
   iree_hal_allocator_t *allocator = iree_hal_device_allocator(device_);
@@ -1082,6 +1149,14 @@ IREEBackend::runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen) {
   return nextToken;
 }
 
+// Forward declaration for incremental decode
+llvm::Expected<int64_t>
+runDecodeIncremental(IREEBackend *backend, int64_t token, int seqLen,
+                     iree_vm_context_t *context, iree_vm_function_t &decodeFn,
+                     iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                     const LLMModelConfig &config,
+                     iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView);
+
 llvm::Expected<int64_t> IREEBackend::runDecode(int64_t token, int seqLen,
                                                int startPos) {
   static int decodeCallCount = 0;
@@ -1092,6 +1167,13 @@ llvm::Expected<int64_t> IREEBackend::runDecode(int64_t token, int seqLen,
                  << "token=" << token << ", seqLen=" << seqLen << ", startPos=" << startPos << "\n";
   }
   decodeCallCount++;
+  
+  // Dispatch to incremental model if needed
+  if (modelConfig_.isIncremental()) {
+    return runDecodeIncremental(this, token, seqLen, context_, decodeFn_,
+                                device_, hostAllocator_, modelConfig_,
+                                cacheKView_, cacheVView_);
+  }
   
   iree_status_t status = iree_ok_status();
 
@@ -1399,6 +1481,523 @@ llvm::Expected<int64_t> IREEBackend::runDecode(int64_t token, int seqLen,
 
   iree_vm_list_release(outputs);
 
+  return nextToken;
+}
+
+//===----------------------------------------------------------------------===//
+// Incremental Model Implementation
+//===----------------------------------------------------------------------===//
+
+// Incremental decode: decode_step(token[1,1], seq_len[1], attention_mask[1,max_cache_len+1], cache_k, cache_v)
+//   -> (logits[1,1,vocab], new_k, new_v)
+llvm::Expected<int64_t>
+runDecodeIncremental(IREEBackend *backend, int64_t token, int seqLen,
+                     iree_vm_context_t *context, iree_vm_function_t &decodeFn,
+                     iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                     const LLMModelConfig &config,
+                     iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView) {
+  static int decodeCount = 0;
+  if (decodeCount < 3) {
+    llvm::errs() << "IREEBackend::runDecodeIncremental[" << decodeCount << "]: "
+                 << "token=" << token << ", seqLen=" << seqLen << "\n";
+  }
+  decodeCount++;
+  
+  iree_status_t status = iree_ok_status();
+  iree_hal_allocator_t *allocator = iree_hal_device_allocator(device);
+  
+  if (!cacheKView || !cacheVView) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "Cache not initialized (call prefill first)");
+  }
+  
+  // 1. Create token buffer: [1, 1]
+  int64_t tokenVal = token;
+  iree_hal_buffer_view_t *tokenView = nullptr;
+  const iree_hal_dim_t tokenDims[] = {1, 1};
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 2, tokenDims, IREE_HAL_ELEMENT_TYPE_INT_64,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(&tokenVal, sizeof(int64_t)),
+      &tokenView);
+  if (!iree_status_is_ok(status)) {
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create token buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 2. Create seq_len buffer: [1]
+  int64_t seqLenVal = static_cast<int64_t>(seqLen);
+  iree_hal_buffer_view_t *seqLenView = nullptr;
+  const iree_hal_dim_t seqLenDims[] = {1};
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 1, seqLenDims, IREE_HAL_ELEMENT_TYPE_INT_64,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(&seqLenVal, sizeof(int64_t)), &seqLenView);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokenView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create seq_len buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 3. Create attention_mask buffer: [1, max_cache_len + 1] as f16
+  // Mask is 1.0 for valid positions [0, seqLen), 0.0 elsewhere
+  int maskLen = config.maxCacheLen + 1;
+  std::vector<uint16_t> mask(maskLen, 0);  // f16 zeros
+  uint16_t f16_one = 0x3C00;  // 1.0 in float16
+  for (int i = 0; i < seqLen && i < maskLen; ++i) {
+    mask[i] = f16_one;
+  }
+  
+  iree_hal_buffer_view_t *maskView = nullptr;
+  const iree_hal_dim_t maskDims[] = {1, static_cast<iree_hal_dim_t>(maskLen)};
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 2, maskDims, IREE_HAL_ELEMENT_TYPE_FLOAT_16,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(mask.data(), maskLen * sizeof(uint16_t)),
+      &maskView);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokenView);
+    iree_hal_buffer_view_release(seqLenView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create attention_mask buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 4. Build input list: token, seq_len, attention_mask, cache_k, cache_v
+  iree_vm_list_t *inputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 5,
+                               hostAllocator, &inputs);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokenView);
+    iree_hal_buffer_view_release(seqLenView);
+    iree_hal_buffer_view_release(maskView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create input list: %s",
+                                   msg.c_str());
+  }
+  
+  iree_vm_ref_t tokenRef = iree_hal_buffer_view_move_ref(tokenView);
+  iree_vm_ref_t seqLenRef = iree_hal_buffer_view_move_ref(seqLenView);
+  iree_vm_ref_t maskRef = iree_hal_buffer_view_move_ref(maskView);
+  iree_vm_ref_t cacheKRef = iree_hal_buffer_view_retain_ref(cacheKView);
+  iree_vm_ref_t cacheVRef = iree_hal_buffer_view_retain_ref(cacheVView);
+  
+  iree_vm_list_push_ref_move(inputs, &tokenRef);
+  iree_vm_list_push_ref_move(inputs, &seqLenRef);
+  iree_vm_list_push_ref_move(inputs, &maskRef);
+  iree_vm_list_push_ref_move(inputs, &cacheKRef);
+  iree_vm_list_push_ref_move(inputs, &cacheVRef);
+  
+  // 5. Create output list (3 outputs: logits, new_k, new_v)
+  iree_vm_list_t *outputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 3,
+                               hostAllocator, &outputs);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(inputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create output list: %s",
+                                   msg.c_str());
+  }
+  
+  // 6. Invoke decode_step
+  status = iree_vm_invoke(context, decodeFn, IREE_VM_INVOCATION_FLAG_NONE,
+                          nullptr, inputs, outputs, hostAllocator);
+  iree_vm_list_release(inputs);
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    llvm::errs() << "IREEBackend::runDecodeIncremental: Invoke failed: " << msg << "\n";
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to invoke decode_step: %s", msg.c_str());
+  }
+  
+  // 7. Extract logits from output[0] and find argmax
+  iree_vm_ref_t logitsRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_assign(outputs, 0, &logitsRef);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to get logits: %s", msg.c_str());
+  }
+  
+  iree_hal_buffer_view_t *logitsView = iree_hal_buffer_view_deref(logitsRef);
+  if (!logitsView) {
+    iree_vm_list_release(outputs);
+    return llvm::createStringError(std::errc::io_error, "Logits is not a buffer view");
+  }
+  
+  // Read logits: [1, 1, vocab_size]
+  iree_hal_buffer_t *logitsBuffer = iree_hal_buffer_view_buffer(logitsView);
+  int vocabSize = config.vocabSize;
+  size_t rowBytes = vocabSize * sizeof(uint16_t); // f16
+  
+  std::vector<uint16_t> logitsRow(vocabSize);
+  status = iree_hal_device_transfer_d2h(
+      device, logitsBuffer, 0,
+      logitsRow.data(), rowBytes,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to read logits: %s", msg.c_str());
+  }
+  
+  // Find argmax
+  int64_t nextToken = 0;
+  uint16_t maxVal = 0;
+  for (int i = 0; i < vocabSize; ++i) {
+    uint16_t val = logitsRow[i];
+    uint16_t sign = val >> 15;
+    uint16_t magnitude = val & 0x7FFF;
+    uint16_t comparable = sign ? (0x8000 - magnitude) : (0x8000 + magnitude);
+    if (comparable > maxVal) {
+      maxVal = comparable;
+      nextToken = i;
+    }
+  }
+  
+  // 8. Update cache with new_k, new_v at position seqLen-1
+  // Get new_k and new_v from outputs
+  iree_vm_ref_t newKRef = iree_vm_ref_null();
+  iree_vm_ref_t newVRef = iree_vm_ref_null();
+  iree_vm_list_get_ref_retain(outputs, 1, &newKRef);
+  iree_vm_list_get_ref_retain(outputs, 2, &newVRef);
+  
+  iree_hal_buffer_view_t *newKView = iree_hal_buffer_view_deref(newKRef);
+  iree_hal_buffer_view_t *newVView = iree_hal_buffer_view_deref(newVRef);
+  
+  if (newKView && newVView && cacheKView && cacheVView) {
+    // Cache shape: [num_layers, 1, num_kv_heads, max_cache_len, head_dim]
+    // new_k/v shape: [num_layers, 1, num_kv_heads, 1, head_dim]
+    // Position to update: seqLen - 1 (the position where we just generated a token)
+    int pos = seqLen - 1;
+    
+    // Get cache buffer and new_k buffer
+    iree_hal_buffer_t *cacheKBuffer = iree_hal_buffer_view_buffer(cacheKView);
+    iree_hal_buffer_t *newKBuffer = iree_hal_buffer_view_buffer(newKView);
+    iree_hal_buffer_t *cacheVBuffer = iree_hal_buffer_view_buffer(cacheVView);
+    iree_hal_buffer_t *newVBuffer = iree_hal_buffer_view_buffer(newVView);
+    
+    int numLayers = config.numLayers;
+    int numKVHeads = config.numKVHeads;
+    int headDim = config.headDim;
+    int maxCacheLen = config.maxCacheLen;
+    
+    // Row-major layout for [layers, batch, heads, seq, dim]:
+    // - dim varies fastest (stride = 1)
+    // - seq stride = headDim
+    // - heads stride = maxCacheLen * headDim
+    // - batch stride = numKVHeads * maxCacheLen * headDim
+    // - layer stride = 1 * numKVHeads * maxCacheLen * headDim
+    
+    size_t elementSize = sizeof(uint16_t);
+    size_t layerStrideCache = numKVHeads * maxCacheLen * headDim * elementSize;
+    size_t headStrideCache = maxCacheLen * headDim * elementSize;
+    size_t posStride = headDim * elementSize;
+    
+    // For new_k: [layers, 1, heads, 1, dim]
+    size_t layerStrideNew = numKVHeads * headDim * elementSize;
+    size_t headStrideNew = headDim * elementSize;
+    
+    // Copy new_k[l,0,h,0,:] to cache_k[l,0,h,pos,:] for each layer and head
+    std::vector<uint16_t> headData(headDim);
+    
+    for (int layer = 0; layer < numLayers; ++layer) {
+      for (int head = 0; head < numKVHeads; ++head) {
+        // Source offset in new_k
+        size_t newOffset = layer * layerStrideNew + head * headStrideNew;
+        
+        // Destination offset in cache_k
+        size_t cacheOffset = layer * layerStrideCache + head * headStrideCache + pos * posStride;
+        
+        // Copy K
+        iree_hal_device_transfer_d2h(device, newKBuffer, newOffset,
+                                      headData.data(), posStride,
+                                      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
+                                      iree_infinite_timeout());
+        iree_hal_device_transfer_h2d(device, headData.data(), cacheKBuffer, cacheOffset,
+                                      posStride, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                      iree_infinite_timeout());
+        
+        // Copy V
+        iree_hal_device_transfer_d2h(device, newVBuffer, newOffset,
+                                      headData.data(), posStride,
+                                      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
+                                      iree_infinite_timeout());
+        iree_hal_device_transfer_h2d(device, headData.data(), cacheVBuffer, cacheOffset,
+                                      posStride, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                      iree_infinite_timeout());
+      }
+    }
+  }
+  
+  iree_vm_list_release(outputs);
+  
+  if (decodeCount <= 3) {
+    llvm::errs() << "IREEBackend::runDecodeIncremental: Next token = " << nextToken << "\n";
+  }
+  
+  return nextToken;
+}
+
+// Incremental prefill: prefill(tokens[1, prefill_len], valid_len[1]) 
+//   -> (logits[1, prefill_len, vocab], cache_k, cache_v)
+llvm::Expected<int64_t>
+runPrefillIncremental(IREEBackend *backend, llvm::ArrayRef<int64_t> tokens, int seqLen,
+                      iree_vm_context_t *context, iree_vm_function_t &prefillFn,
+                      iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                      const LLMModelConfig &config,
+                      iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView) {
+  llvm::errs() << "IREEBackend::runPrefillIncremental: seqLen=" << seqLen 
+               << ", prefillLen=" << config.prefillLen << "\n";
+  
+  iree_status_t status = iree_ok_status();
+  iree_hal_allocator_t *allocator = iree_hal_device_allocator(device);
+  
+  // Pad tokens to prefill_len
+  int prefillLen = config.prefillLen;
+  std::vector<int64_t> paddedTokens(prefillLen, 0);
+  for (int i = 0; i < std::min(seqLen, prefillLen); ++i) {
+    paddedTokens[i] = tokens[i];
+  }
+  
+  // 1. Create tokens buffer: [1, prefill_len]
+  iree_hal_buffer_view_t *tokensView = nullptr;
+  const iree_hal_dim_t tokensDims[] = {1, static_cast<iree_hal_dim_t>(prefillLen)};
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 2, tokensDims, IREE_HAL_ELEMENT_TYPE_INT_64,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(paddedTokens.data(), prefillLen * sizeof(int64_t)),
+      &tokensView);
+  if (!iree_status_is_ok(status)) {
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create tokens buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 2. Create valid_len buffer: [1] (actual sequence length before padding)
+  int64_t validLen = static_cast<int64_t>(seqLen);
+  iree_hal_buffer_view_t *validLenView = nullptr;
+  const iree_hal_dim_t validLenDims[] = {1};
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 1, validLenDims, IREE_HAL_ELEMENT_TYPE_INT_64,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(&validLen, sizeof(int64_t)), &validLenView);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokensView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create valid_len buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 3. Build input list: tokens, valid_len
+  iree_vm_list_t *inputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 2,
+                               hostAllocator, &inputs);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokensView);
+    iree_hal_buffer_view_release(validLenView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create input list: %s",
+                                   msg.c_str());
+  }
+  
+  iree_vm_ref_t tokensRef = iree_hal_buffer_view_move_ref(tokensView);
+  iree_vm_ref_t validLenRef = iree_hal_buffer_view_move_ref(validLenView);
+  iree_vm_list_push_ref_move(inputs, &tokensRef);
+  iree_vm_list_push_ref_move(inputs, &validLenRef);
+  
+  // 4. Create output list (3 outputs: logits, cache_k, cache_v)
+  iree_vm_list_t *outputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 3,
+                               hostAllocator, &outputs);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(inputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create output list: %s",
+                                   msg.c_str());
+  }
+  
+  // 5. Invoke prefill
+  llvm::errs() << "IREEBackend::runPrefillIncremental: Invoking prefill...\n";
+  status = iree_vm_invoke(context, prefillFn, IREE_VM_INVOCATION_FLAG_NONE,
+                          nullptr, inputs, outputs, hostAllocator);
+  iree_vm_list_release(inputs);
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    llvm::errs() << "IREEBackend::runPrefillIncremental: Invoke failed: " << msg << "\n";
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to invoke prefill: %s", msg.c_str());
+  }
+  
+  // 6. Extract outputs
+  iree_host_size_t outputSize = iree_vm_list_size(outputs);
+  llvm::errs() << "IREEBackend::runPrefillIncremental: Output list has " << outputSize << " elements\n";
+  
+  if (outputSize < 3) {
+    iree_vm_list_release(outputs);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Prefill output has less than 3 elements");
+  }
+  
+  // Get logits (output 0) to find next token
+  iree_vm_ref_t logitsRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_assign(outputs, 0, &logitsRef);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to get logits: %s", msg.c_str());
+  }
+  
+  iree_hal_buffer_view_t *logitsView = iree_hal_buffer_view_deref(logitsRef);
+  if (!logitsView) {
+    iree_vm_list_release(outputs);
+    return llvm::createStringError(std::errc::io_error, "Logits is not a buffer view");
+  }
+  
+  // Print logits shape
+  iree_host_size_t logitsRank = iree_hal_buffer_view_shape_rank(logitsView);
+  llvm::errs() << "IREEBackend::runPrefillIncremental: Logits rank=" << logitsRank << ", shape=[";
+  for (iree_host_size_t i = 0; i < logitsRank; ++i) {
+    if (i > 0) llvm::errs() << ", ";
+    llvm::errs() << iree_hal_buffer_view_shape_dim(logitsView, i);
+  }
+  llvm::errs() << "]\n";
+  
+  // Get cache_k and cache_v (outputs 1, 2) and store for decode
+  iree_vm_ref_t cacheKRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_retain(outputs, 1, &cacheKRef);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to get cache_k: %s", msg.c_str());
+  }
+  cacheKView = iree_hal_buffer_view_deref(cacheKRef);
+  if (cacheKView) iree_hal_buffer_view_retain(cacheKView);
+  
+  iree_vm_ref_t cacheVRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_retain(outputs, 2, &cacheVRef);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to get cache_v: %s", msg.c_str());
+  }
+  cacheVView = iree_hal_buffer_view_deref(cacheVRef);
+  if (cacheVView) iree_hal_buffer_view_retain(cacheVView);
+  
+  llvm::errs() << "IREEBackend::runPrefillIncremental: Got cache_k and cache_v\n";
+  
+  // Read logits to find argmax at position seqLen-1
+  // Logits shape: [1, prefill_len, vocab_size], we want [0, seqLen-1, :]
+  iree_hal_buffer_t *logitsBuffer = iree_hal_buffer_view_buffer(logitsView);
+  
+  // For f16, vocab_size elements at each position
+  int vocabSize = config.vocabSize;
+  size_t elementSize = sizeof(uint16_t); // f16
+  size_t rowBytes = vocabSize * elementSize;
+  
+  // Read the row at seqLen-1
+  std::vector<uint16_t> logitsRow(vocabSize);
+  size_t rowOffset = (seqLen - 1) * rowBytes;
+  
+  status = iree_hal_device_transfer_d2h(
+      device, logitsBuffer, rowOffset,
+      logitsRow.data(), rowBytes,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to read logits: %s", msg.c_str());
+  }
+  
+  // Find argmax (treating f16 as uint16 and comparing raw values works for positive values)
+  // For proper f16 comparison, we'd need to convert to float first
+  // Simple argmax over raw f16 bits (approximation that works for most cases)
+  int64_t nextToken = 0;
+  uint16_t maxVal = 0;
+  for (int i = 0; i < vocabSize; ++i) {
+    // Convert f16 to comparable format (sign-magnitude to allow comparison)
+    uint16_t val = logitsRow[i];
+    uint16_t sign = val >> 15;
+    uint16_t magnitude = val & 0x7FFF;
+    // For positive values, just compare. For negative, invert.
+    uint16_t comparable = sign ? (0x8000 - magnitude) : (0x8000 + magnitude);
+    if (comparable > maxVal) {
+      maxVal = comparable;
+      nextToken = i;
+    }
+  }
+  
+  llvm::errs() << "IREEBackend::runPrefillIncremental: Next token = " << nextToken << "\n";
+  
+  iree_vm_list_release(outputs);
   return nextToken;
 }
 
