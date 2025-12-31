@@ -116,7 +116,10 @@ iree_cc_library(
 # Tokenizer library
 #-------------------------------------------------------------------------------
 set(TOKENIZER_DEPS LLVMSupport)
-set(TOKENIZER_SRCS "Tokenizer/Tokenizer.cpp")
+set(TOKENIZER_SRCS 
+  "Tokenizer/Tokenizer.cpp"
+  "Tokenizer/BPETokenizer.cpp"
+)
 if(IREE_LLM_ASSIST_ENABLE_SENTENCEPIECE)
   list(APPEND TOKENIZER_SRCS "Tokenizer/SentencePieceTokenizer.cpp")
   list(APPEND TOKENIZER_DEPS sentencepiece-static)
@@ -127,6 +130,7 @@ iree_cc_library(
     Tokenizer
   HDRS
     "Tokenizer/Tokenizer.h"
+    "Tokenizer/BPETokenizer.h"
   SRCS
     ${TOKENIZER_SRCS}
   DEPS

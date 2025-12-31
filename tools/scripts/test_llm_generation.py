@@ -39,9 +39,59 @@ except ImportError:
 
 try:
     import sentencepiece as spm
+    HAS_SENTENCEPIECE = True
 except ImportError:
-    print("Error: sentencepiece not found. Install with: pip install sentencepiece")
+    HAS_SENTENCEPIECE = False
+
+try:
+    from transformers import AutoTokenizer
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+
+if not HAS_SENTENCEPIECE and not HAS_TRANSFORMERS:
+    print("Error: Need either sentencepiece or transformers. Install with:")
+    print("  pip install sentencepiece  # for .model files")
+    print("  pip install transformers   # for .json files")
     sys.exit(1)
+
+
+class TokenizerWrapper:
+    """Wrapper to provide unified interface for different tokenizer types."""
+    
+    def __init__(self, tokenizer_path: str):
+        self.tokenizer_path = tokenizer_path
+        
+        if tokenizer_path.endswith('.json'):
+            if not HAS_TRANSFORMERS:
+                raise RuntimeError("transformers required for .json tokenizers")
+            # Load from directory containing tokenizer.json
+            import os
+            tok_dir = os.path.dirname(tokenizer_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(tok_dir)
+            self.tokenizer_type = "bpe"
+            self.bos_id = self.tokenizer.bos_token_id or 128000
+            self.eos_id = self.tokenizer.eos_token_id or 128001
+        else:
+            if not HAS_SENTENCEPIECE:
+                raise RuntimeError("sentencepiece required for .model tokenizers")
+            self.tokenizer = spm.SentencePieceProcessor()
+            self.tokenizer.load(tokenizer_path)
+            self.tokenizer_type = "sentencepiece"
+            self.bos_id = self.tokenizer.bos_id()
+            self.eos_id = self.tokenizer.eos_id()
+    
+    def encode(self, text: str) -> list:
+        if self.tokenizer_type == "bpe":
+            return self.tokenizer.encode(text, add_special_tokens=False)
+        else:
+            return self.tokenizer.encode(text)
+    
+    def decode(self, tokens: list) -> str:
+        if self.tokenizer_type == "bpe":
+            return self.tokenizer.decode(tokens)
+        else:
+            return self.tokenizer.decode(tokens)
 
 
 class IREELLMGenerator:
@@ -54,9 +104,10 @@ class IREELLMGenerator:
         self.device_block_count = device_block_count
         self.page_size = page_size
         
-        # Load tokenizer
-        self.tokenizer = spm.SentencePieceProcessor()
-        self.tokenizer.load(tokenizer_path)
+        # Load tokenizer (auto-detect type)
+        self.tokenizer = TokenizerWrapper(tokenizer_path)
+        self.bos_id = self.tokenizer.bos_id
+        self.eos_id = self.tokenizer.eos_id
         
         # Load IREE module
         self.instance = rt.VmInstance()
@@ -107,7 +158,7 @@ class IREELLMGenerator:
         cache_device = rt.asdevicearray(self.config.device, cache_np)
         
         # Tokenize input
-        tokens = [self.tokenizer.bos_id()] + self.tokenizer.encode(prompt)
+        tokens = [self.bos_id] + self.tokenizer.encode(prompt)
         seq_len = len(tokens)
         
         if verbose:
@@ -136,7 +187,7 @@ class IREELLMGenerator:
         # Decode loop
         decode_start = time.time()
         for i in range(max_tokens - 1):
-            if stop_on_eos and next_token == self.tokenizer.eos_id():
+            if stop_on_eos and next_token == self.eos_id:
                 if verbose:
                     print(f"EOS reached at step {i+1}")
                 break
@@ -181,6 +232,12 @@ def main():
                         help="Run multiple test prompts")
     parser.add_argument("--budget-aware", action="store_true",
                         help="Instruct LLM to wrap up within token budget")
+    parser.add_argument("--block-stride", type=int, default=32,
+                        help="Block sequence stride for paged attention")
+    parser.add_argument("--device-block-count", type=int, default=64,
+                        help="Number of blocks for KV cache on device")
+    parser.add_argument("--page-size", type=int, default=None,
+                        help="Page size in elements (auto-calculated if not specified)")
     args = parser.parse_args()
     
     print("Loading model...")
@@ -189,6 +246,9 @@ def main():
         irpa_path=args.irpa,
         tokenizer_path=args.tokenizer,
         device=args.device,
+        block_stride=args.block_stride,
+        device_block_count=args.device_block_count,
+        page_size=args.page_size if args.page_size else 5324800,  # Default from open_llama_3b
     )
     print("Model loaded!\n")
     

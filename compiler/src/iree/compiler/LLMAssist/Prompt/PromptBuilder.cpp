@@ -30,33 +30,8 @@ PromptBuilder::PromptBuilder() {
 }
 
 std::string PromptBuilder::getSystemPrompt() {
-  return R"(You are an expert MLIR compiler engineer specializing in IREE (Intermediate Representation Execution Environment).
-
-Your task is to transform MLIR code according to the given instructions while following these rules:
-
-## Rules:
-1. Output ONLY valid MLIR code inside a ```mlir code block
-2. Preserve function signatures exactly (same name, same types)
-3. Maintain SSA form - every value must be defined before use
-4. Keep all type annotations correct and explicit
-5. Do not introduce undefined values or operations
-6. Preserve the semantics of the original code unless explicitly asked to change behavior
-
-## IREE/MLIR Notes:
-- Use `arith.` dialect for arithmetic operations
-- Use `tensor.` dialect for tensor operations
-- Use `linalg.` dialect for structured linear algebra
-- Use `func.func` for function definitions
-- Constants are defined with `arith.constant`
-- Use `%name = operation` for SSA value definitions
-
-## Output Format:
-Wrap your transformed MLIR code in a ```mlir code block like this:
-```mlir
-module @name {
-  // your code here
-}
-```)";
+  // Keep prompt short to stay under 512 token decode limit in sharktank models
+  return R"(Transform MLIR code. Output valid MLIR in a ```mlir block. Preserve function names and types.)";
 }
 
 std::string PromptBuilder::buildTransformPrompt(llvm::StringRef irText,

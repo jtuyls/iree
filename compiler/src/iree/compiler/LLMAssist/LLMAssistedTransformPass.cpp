@@ -121,8 +121,9 @@ public:
     PromptBuilder promptBuilder;
     PromptConfig promptConfig;
     promptConfig.taskDescription = taskDescription.getValue();
-    promptConfig.includeFewShot = true;
-    promptConfig.maxFewShotExamples = 1;
+    // Disable few-shot to keep prompt under 512 tokens (sharktank model limit)
+    promptConfig.includeFewShot = false;
+    promptConfig.maxFewShotExamples = 0;
     promptConfig.requestExplanation = false;
 
     std::string prompt = promptBuilder.buildTransformPrompt(irText, promptConfig);

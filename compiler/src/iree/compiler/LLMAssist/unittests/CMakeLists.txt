@@ -79,3 +79,15 @@ iree_cc_test(
     iree::testing::gtest_main
 )
 
+iree_cc_test(
+  NAME
+    BPETokenizerTest
+  SRCS
+    "BPETokenizerTest.cpp"
+  DEPS
+    gmock
+    gtest
+    iree::compiler::LLMAssist::Tokenizer
+    iree::testing::gtest_main
+)
+

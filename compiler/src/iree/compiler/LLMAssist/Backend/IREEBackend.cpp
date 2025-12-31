@@ -81,6 +81,12 @@ LLMModelConfig::loadFromFile(llvm::StringRef path) {
         config.vocabSize = *v;
       if (auto v = llmAssist->getInteger("block_seq_stride"))
         config.blockSeqStride = *v;
+      if (auto v = llmAssist->getInteger("device_block_count"))
+        config.deviceBlockCount = *v;
+      if (auto v = llmAssist->getInteger("page_size"))
+        config.pageSize = *v;
+      if (auto v = llmAssist->getInteger("context_length"))
+        config.contextLength = *v;
       if (auto s = llmAssist->getString("model_type"))
         config.modelType = s->str();
     }
@@ -239,12 +245,15 @@ llvm::Error IREEBackend::initialize() {
                  << modelConfig_.blockSeqStride << "\n";
   }
 
-  // Initialize tokenizer
-  auto tokenizerOrErr = createSentencePieceTokenizer(config_.tokenizerPath);
+  // Initialize tokenizer (auto-detect type based on file extension)
+  auto tokenizerOrErr = createTokenizer(config_.tokenizerPath);
   if (!tokenizerOrErr) {
     return tokenizerOrErr.takeError();
   }
   tokenizer_ = std::move(*tokenizerOrErr);
+  llvm::errs() << "IREEBackend::initialize: Loaded " << tokenizer_->getName()
+               << " tokenizer with vocab size " << tokenizer_->vocabSize()
+               << "\n";
 
   // Create VM instance
   iree_status_t status =
@@ -475,13 +484,19 @@ llvm::Error IREEBackend::initialize() {
   }
 
   // Initialize flat KV-cache buffer (matches Python test approach)
-  // pageSize = numLayers * 2 * numKVHeads * blockSeqStride * headDim
   blockSeqStride_ = modelConfig_.blockSeqStride;
-  pageSize_ = static_cast<int64_t>(modelConfig_.numLayers) * 2 *
-              static_cast<int64_t>(modelConfig_.numKVHeads) *
-              static_cast<int64_t>(blockSeqStride_) *
-              static_cast<int64_t>(modelConfig_.headDim);
-  deviceBlockCount_ = 64; // Default, can be configured
+  deviceBlockCount_ = modelConfig_.deviceBlockCount;
+  
+  // Use page_size from config if provided, otherwise calculate
+  if (modelConfig_.pageSize > 0) {
+    pageSize_ = modelConfig_.pageSize;
+  } else {
+    // Default calculation: numLayers * 2 * numKVHeads * blockSeqStride * headDim
+    pageSize_ = static_cast<int64_t>(modelConfig_.numLayers) * 2 *
+                static_cast<int64_t>(modelConfig_.numKVHeads) *
+                static_cast<int64_t>(blockSeqStride_) *
+                static_cast<int64_t>(modelConfig_.headDim);
+  }
 
   llvm::errs() << "IREEBackend::initialize: Initializing cache...\n";
   if (auto err = initializeCache()) {
@@ -719,7 +734,7 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
   // Decode loop
   int currentSeqLen = seqLen + 1; // After prefill, we've added one token
   // Use model's context length from config (2048 for this model)
-  int maxSeqLen = 2048; // TODO: Load from model config
+  int maxSeqLen = modelConfig_.contextLength;
   
   for (int i = 0; i < maxNewTokens - 1; ++i) {
     // Check for EOS
@@ -753,7 +768,7 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
 }
 
 // Set to true to enable detailed prefill/decode debug output
-static const bool kEnableDebugOutput = false;
+static const bool kEnableDebugOutput = true;
 
 llvm::Expected<int64_t>
 IREEBackend::runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen) {
@@ -1128,6 +1143,23 @@ llvm::Expected<int64_t> IREEBackend::runDecode(int64_t token, int seqLen,
   for (int i = 0; i < numPages; ++i) {
     pageTable[i] = i;
   }
+  
+  // Debug: Print decode inputs for first 2 calls
+  if (decodeCallCount <= 2) {
+    llvm::errs() << "IREEBackend::runDecode[" << (decodeCallCount-1) << "] INPUTS:\n";
+    llvm::errs() << "  token=" << tokenVal << " (shape [1,1])\n";
+    llvm::errs() << "  seq_len=" << seqLenVal << " (shape [1])\n";
+    llvm::errs() << "  start_pos=" << startPosVal << " (shape [1])\n";
+    llvm::errs() << "  page_table=[";
+    for (int i = 0; i < std::min(numPages, 5); ++i) {
+      if (i > 0) llvm::errs() << ", ";
+      llvm::errs() << pageTable[i];
+    }
+    if (numPages > 5) llvm::errs() << ", ...";
+    llvm::errs() << "] (shape [1," << numPages << "])\n";
+    llvm::errs() << "  blockSeqStride_=" << blockSeqStride_ << "\n";
+  }
+  
   status = iree_hal_device_transfer_h2d(device_, pageTable.data(), decodePageTableBuffer_,
                                          0, numPages * sizeof(int64_t),
                                          IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,

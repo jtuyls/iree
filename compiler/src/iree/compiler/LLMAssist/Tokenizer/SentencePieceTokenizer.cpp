@@ -21,7 +21,7 @@ public:
       std::unique_ptr<sentencepiece::SentencePieceProcessor> processor)
       : processor_(std::move(processor)) {}
 
-  std::vector<int64_t> encode(llvm::StringRef text) override {
+  std::vector<int64_t> encode(llvm::StringRef text) const override {
     std::vector<int> ids;
     auto status = processor_->Encode(text.str(), &ids);
     if (!status.ok()) {
@@ -32,7 +32,7 @@ public:
     return std::vector<int64_t>(ids.begin(), ids.end());
   }
 
-  std::string decode(llvm::ArrayRef<int64_t> ids) override {
+  std::string decode(llvm::ArrayRef<int64_t> ids) const override {
     std::vector<int> intIds(ids.begin(), ids.end());
     std::string text;
     auto status = processor_->Decode(intIds, &text);
@@ -44,7 +44,7 @@ public:
     return text;
   }
 
-  std::string decodeToken(int64_t id) override {
+  std::string decodeToken(int64_t id) const override {
     return processor_->IdToPiece(static_cast<int>(id));
   }
 

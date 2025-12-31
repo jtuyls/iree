@@ -15,7 +15,9 @@
 //     iree-tokenizer=/path/to/tokenizer.model iree-device=hip task="test" verbose=true})'
 
 // REQUIRES: iree_backend_available
-// RUN: iree-opt %s --pass-pipeline='builtin.module(iree-llm-assisted-transform{backend=iree iree-vmfb=%LLM_ASSIST_VMFB% iree-irpa=%LLM_ASSIST_IRPA% iree-tokenizer=%LLM_ASSIST_TOKENIZER% iree-device=%LLM_ASSIST_DEVICE% task="Optimize the multiply by 2 using a left shift" verbose=true})' 2>&1 | FileCheck %s
+// Note: The sharktank-exported model has a 512 decode position limit.
+// Keep the total prompt (system prompt + IR + task) under ~300 tokens to leave room for generation.
+// RUN: iree-opt %s --pass-pipeline='builtin.module(iree-llm-assisted-transform{backend=iree iree-vmfb=%LLM_ASSIST_VMFB% iree-irpa=%LLM_ASSIST_IRPA% iree-tokenizer=%LLM_ASSIST_TOKENIZER% iree-device=%LLM_ASSIST_DEVICE% task="shift" verbose=true})' 2>&1 | FileCheck %s
 
 // CHECK: IREEBackend::initialize: Starting
 // CHECK: IREEBackend::initialize: Complete!

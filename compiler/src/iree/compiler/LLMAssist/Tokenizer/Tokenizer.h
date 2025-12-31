@@ -24,13 +24,13 @@ public:
   virtual ~Tokenizer() = default;
 
   /// Encode text to token IDs.
-  virtual std::vector<int64_t> encode(llvm::StringRef text) = 0;
+  virtual std::vector<int64_t> encode(llvm::StringRef text) const = 0;
 
   /// Decode token IDs back to text.
-  virtual std::string decode(llvm::ArrayRef<int64_t> ids) = 0;
+  virtual std::string decode(llvm::ArrayRef<int64_t> ids) const = 0;
 
   /// Decode a single token ID to text.
-  virtual std::string decodeToken(int64_t id) = 0;
+  virtual std::string decodeToken(int64_t id) const = 0;
 
   /// Get the vocabulary size.
   virtual size_t vocabSize() const = 0;
@@ -51,6 +51,17 @@ createSentencePieceTokenizer(llvm::StringRef modelPath);
 
 /// Check if SentencePiece tokenizer support is available.
 bool isSentencePieceAvailable();
+
+/// Factory function to create a BPE tokenizer from tokenizer.json.
+/// This supports Llama 3.x, GPT-4, and similar BPE tokenizers.
+llvm::Expected<std::unique_ptr<Tokenizer>>
+createBPETokenizer(llvm::StringRef tokenizerJsonPath);
+
+/// Create the appropriate tokenizer based on file extension.
+/// - .model -> SentencePiece
+/// - .json -> BPE
+llvm::Expected<std::unique_ptr<Tokenizer>>
+createTokenizer(llvm::StringRef path);
 
 } // namespace mlir::iree_compiler::LLMAssist
 

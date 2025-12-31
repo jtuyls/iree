@@ -53,6 +53,9 @@ struct LLMModelConfig {
   int headDim = 128;
   int vocabSize = 32000;
   int blockSeqStride = 16;
+  int deviceBlockCount = 64;
+  int64_t pageSize = 0; // 0 means auto-calculate
+  int contextLength = 4096;
   std::string modelType = "llama";
 
   /// Load configuration from a JSON file.
