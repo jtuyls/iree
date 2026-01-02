@@ -120,9 +120,8 @@ void IREEBackend::cleanup() {
   if (maskView_) iree_hal_buffer_view_release(maskView_);
   if (maskBuffer_) iree_hal_buffer_release(maskBuffer_);
   
-  // Release cache views
-  if (cacheKView_) iree_hal_buffer_view_release(cacheKView_);
-  if (cacheVView_) iree_hal_buffer_view_release(cacheVView_);
+  // Release cache view
+  if (cacheView_) iree_hal_buffer_view_release(cacheView_);
 
   // Release IREE resources
   if (context_) iree_vm_context_release(context_);
@@ -138,8 +137,7 @@ void IREEBackend::cleanup() {
   positionBuffer_ = nullptr;
   maskView_ = nullptr;
   maskBuffer_ = nullptr;
-  cacheKView_ = nullptr;
-  cacheVView_ = nullptr;
+  cacheView_ = nullptr;
   context_ = nullptr;
   llmModule_ = nullptr;
   paramsModule_ = nullptr;
@@ -379,14 +377,13 @@ llvm::Error IREEBackend::initialize() {
                                           hostAllocator_, &positionView_);
   }
 
-  // Attention mask buffer [1, attentionMaskLen]
+  // Valid length buffer [1, 1] (used as valid_len for inplace cache model)
   if (iree_status_is_ok(status)) {
-    size_t maskBytes = modelConfig_.attentionMaskLen * sizeof(int64_t);
     status = iree_hal_allocator_allocate_buffer(allocator, bufParams,
-                                                 maskBytes, &maskBuffer_);
+                                                 sizeof(int64_t), &maskBuffer_);
   }
   if (iree_status_is_ok(status)) {
-    const iree_hal_dim_t dims[] = {1, static_cast<iree_hal_dim_t>(modelConfig_.attentionMaskLen)};
+    const iree_hal_dim_t dims[] = {1, 1};
     status = iree_hal_buffer_view_create(maskBuffer_, 2, dims,
                                           IREE_HAL_ELEMENT_TYPE_INT_64,
                                           IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
@@ -527,23 +524,18 @@ IREEBackend::runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen) {
                                    "Failed to invoke prefill: %s", msg.c_str());
   }
 
-  // Extract outputs: logits, cache_k, cache_v
+  // Extract outputs: logits, cache (combined K/V)
   iree_vm_ref_t logitsRef = iree_vm_ref_null();
   iree_vm_list_get_ref_assign(outputs, 0, &logitsRef);
   iree_hal_buffer_view_t *logitsView = iree_hal_buffer_view_deref(logitsRef);
 
-  iree_vm_ref_t cacheKRef = iree_vm_ref_null();
-  iree_vm_ref_t cacheVRef = iree_vm_ref_null();
-  iree_vm_list_get_ref_assign(outputs, 1, &cacheKRef);
-  iree_vm_list_get_ref_assign(outputs, 2, &cacheVRef);
+  iree_vm_ref_t cacheRef = iree_vm_ref_null();
+  iree_vm_list_get_ref_assign(outputs, 1, &cacheRef);
   
-  // Release old cache views and retain new ones
-  if (cacheKView_) iree_hal_buffer_view_release(cacheKView_);
-  if (cacheVView_) iree_hal_buffer_view_release(cacheVView_);
-  cacheKView_ = iree_hal_buffer_view_deref(cacheKRef);
-  cacheVView_ = iree_hal_buffer_view_deref(cacheVRef);
-  if (cacheKView_) iree_hal_buffer_view_retain(cacheKView_);
-  if (cacheVView_) iree_hal_buffer_view_retain(cacheVView_);
+  // Release old cache view and retain new one
+  if (cacheView_) iree_hal_buffer_view_release(cacheView_);
+  cacheView_ = iree_hal_buffer_view_deref(cacheRef);
+  if (cacheView_) iree_hal_buffer_view_retain(cacheView_);
 
   // Find argmax at position seqLen-1
   iree_hal_buffer_t *logitsBuffer = iree_hal_buffer_view_buffer(logitsView);
@@ -577,21 +569,21 @@ IREEBackend::runDecode(int64_t token, int position) {
   LLVM_DEBUG(llvm::dbgs() << "IREEBackend::runDecode: token=" << token 
                           << ", pos=" << position << "\n");
 
-  if (!cacheKView_ || !cacheVView_) {
+  if (!cacheView_) {
     return llvm::createStringError(std::errc::invalid_argument,
                                    "Cache not initialized");
   }
 
   iree_status_t status = iree_ok_status();
 
-  // Update token buffer
+  // Update token buffer [1,1]
   int64_t tokenVal = token;
   status = iree_hal_device_transfer_h2d(device_, &tokenVal, tokenBuffer_,
                                          0, sizeof(int64_t),
                                          IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
                                          iree_infinite_timeout());
 
-  // Update position buffer
+  // Update position buffer [1,1]
   int64_t posVal = static_cast<int64_t>(position);
   if (iree_status_is_ok(status)) {
     status = iree_hal_device_transfer_h2d(device_, &posVal, positionBuffer_,
@@ -600,14 +592,11 @@ IREEBackend::runDecode(int64_t token, int position) {
                                            iree_infinite_timeout());
   }
 
-  // Update attention mask: 1s for positions 0..position
-  std::vector<int64_t> mask(modelConfig_.attentionMaskLen, 0);
-  for (int i = 0; i <= position; ++i) {
-    mask[i] = 1;
-  }
+  // Update valid_len buffer [1,1] - number of valid positions (position + 1)
+  int64_t validLen = static_cast<int64_t>(position + 1);
   if (iree_status_is_ok(status)) {
-    status = iree_hal_device_transfer_h2d(device_, mask.data(), maskBuffer_,
-                                           0, modelConfig_.attentionMaskLen * sizeof(int64_t),
+    status = iree_hal_device_transfer_h2d(device_, &validLen, maskBuffer_,
+                                           0, sizeof(int64_t),
                                            IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
                                            iree_infinite_timeout());
   }
@@ -619,9 +608,9 @@ IREEBackend::runDecode(int64_t token, int position) {
                                    "Failed to update inputs: %s", msg.c_str());
   }
 
-  // Build input list
+  // Build input list: token, position_id, cache, valid_len
   iree_vm_list_t *inputs = nullptr;
-  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 5,
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 4,
                                hostAllocator_, &inputs);
   if (!iree_status_is_ok(status)) {
     auto msg = formatStatus(status);
@@ -633,21 +622,18 @@ IREEBackend::runDecode(int64_t token, int position) {
   // Retain views for reuse
   iree_hal_buffer_view_retain(tokenView_);
   iree_hal_buffer_view_retain(positionView_);
+  iree_hal_buffer_view_retain(cacheView_);
   iree_hal_buffer_view_retain(maskView_);
-  iree_hal_buffer_view_retain(cacheKView_);
-  iree_hal_buffer_view_retain(cacheVView_);
 
   iree_vm_ref_t tokenRef = iree_hal_buffer_view_move_ref(tokenView_);
   iree_vm_ref_t posRef = iree_hal_buffer_view_move_ref(positionView_);
-  iree_vm_ref_t maskRef = iree_hal_buffer_view_move_ref(maskView_);
-  iree_vm_ref_t cacheKRef = iree_hal_buffer_view_move_ref(cacheKView_);
-  iree_vm_ref_t cacheVRef = iree_hal_buffer_view_move_ref(cacheVView_);
+  iree_vm_ref_t cacheRef = iree_hal_buffer_view_move_ref(cacheView_);
+  iree_vm_ref_t validLenRef = iree_hal_buffer_view_move_ref(maskView_);
 
-  iree_vm_list_push_ref_move(inputs, &tokenRef);
-  iree_vm_list_push_ref_move(inputs, &posRef);
-  iree_vm_list_push_ref_move(inputs, &maskRef);
-  iree_vm_list_push_ref_move(inputs, &cacheKRef);
-  iree_vm_list_push_ref_move(inputs, &cacheVRef);
+  iree_vm_list_push_ref_move(inputs, &tokenRef);     // arg0: token [1,1]
+  iree_vm_list_push_ref_move(inputs, &posRef);       // arg1: position_id [1,1]
+  iree_vm_list_push_ref_move(inputs, &cacheRef);     // arg2: cache [cache_len,layers,2,heads,dim]
+  iree_vm_list_push_ref_move(inputs, &validLenRef);  // arg3: valid_len [1,1]
 
   // Create output list
   iree_vm_list_t *outputs = nullptr;
@@ -674,78 +660,17 @@ IREEBackend::runDecode(int64_t token, int position) {
                                    "Failed to invoke decode_step: %s", msg.c_str());
   }
 
-  // Extract logits and new_kv
+  // Extract logits and updated cache
   iree_vm_ref_t logitsRef = iree_vm_ref_null();
   iree_vm_list_get_ref_assign(outputs, 0, &logitsRef);
   iree_hal_buffer_view_t *logitsView = iree_hal_buffer_view_deref(logitsRef);
 
-  iree_vm_ref_t newKVRef = iree_vm_ref_null();
-  iree_vm_list_get_ref_assign(outputs, 1, &newKVRef);
-  iree_hal_buffer_view_t *newKVView = iree_hal_buffer_view_deref(newKVRef);
-
-  // Update cache with new_kv
-  // new_kv shape: [heads, 2, layers, dim]
-  // cache shape: [max_cache_len, layers, heads, dim]
-  int numLayers = modelConfig_.numLayers;
-  int numHeads = modelConfig_.numKVHeads;
-  int headDim = modelConfig_.headDim;
-  size_t newKVBytes = numHeads * 2 * numLayers * headDim * sizeof(uint16_t);
-
-  std::vector<uint16_t> newKVHost(numHeads * 2 * numLayers * headDim);
-  iree_hal_buffer_t *newKVBuffer = iree_hal_buffer_view_buffer(newKVView);
-  status = iree_hal_device_transfer_d2h(
-      device_, newKVBuffer, 0, newKVHost.data(), newKVBytes,
-      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
-
-  if (!iree_status_is_ok(status)) {
-    iree_vm_list_release(outputs);
-    auto msg = formatStatus(status);
-    iree_status_free(status);
-    return llvm::createStringError(std::errc::io_error,
-                                   "Failed to read new_kv: %s", msg.c_str());
-  }
-
-  // Transpose [heads, 2, layers, dim] -> [layers, heads, dim] for K and V
-  size_t sliceSize = numLayers * numHeads * headDim;
-  std::vector<uint16_t> newK(sliceSize);
-  std::vector<uint16_t> newV(sliceSize);
-
-  for (int h = 0; h < numHeads; ++h) {
-    for (int l = 0; l < numLayers; ++l) {
-      for (int d = 0; d < headDim; ++d) {
-        size_t srcK = h * 2 * numLayers * headDim + 0 * numLayers * headDim + l * headDim + d;
-        size_t srcV = h * 2 * numLayers * headDim + 1 * numLayers * headDim + l * headDim + d;
-        size_t dst = l * numHeads * headDim + h * headDim + d;
-        newK[dst] = newKVHost[srcK];
-        newV[dst] = newKVHost[srcV];
-      }
-    }
-  }
-
-  // Write to cache at position
-  size_t posOffset = position * sliceSize * sizeof(uint16_t);
-  iree_hal_buffer_t *cacheKBuffer = iree_hal_buffer_view_buffer(cacheKView_);
-  iree_hal_buffer_t *cacheVBuffer = iree_hal_buffer_view_buffer(cacheVView_);
-
-  status = iree_hal_device_transfer_h2d(
-      device_, newK.data(), cacheKBuffer, posOffset,
-      sliceSize * sizeof(uint16_t),
-      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
-
-  if (iree_status_is_ok(status)) {
-    status = iree_hal_device_transfer_h2d(
-        device_, newV.data(), cacheVBuffer, posOffset,
-        sliceSize * sizeof(uint16_t),
-        IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
-  }
-
-  if (!iree_status_is_ok(status)) {
-    iree_vm_list_release(outputs);
-    auto msg = formatStatus(status);
-    iree_status_free(status);
-    return llvm::createStringError(std::errc::io_error,
-                                   "Failed to update cache: %s", msg.c_str());
-  }
+  // Update cache view with the returned cache (in-place updates are in the same buffer)
+  iree_vm_ref_t newCacheRef = iree_vm_ref_null();
+  iree_vm_list_get_ref_assign(outputs, 1, &newCacheRef);
+  if (cacheView_) iree_hal_buffer_view_release(cacheView_);
+  cacheView_ = iree_hal_buffer_view_deref(newCacheRef);
+  if (cacheView_) iree_hal_buffer_view_retain(cacheView_);
 
   // Find argmax
   int vocabSize = modelConfig_.vocabSize;

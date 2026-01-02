@@ -130,9 +130,9 @@ private:
   iree_vm_function_t prefillFn_;
   iree_vm_function_t decodeFn_;
 
-  // KV Cache buffers (contiguous layout: [max_cache_len, layers, heads, dim])
-  iree_hal_buffer_view_t *cacheKView_ = nullptr;
-  iree_hal_buffer_view_t *cacheVView_ = nullptr;
+  // KV Cache buffer (combined layout: [cache_len, layers, 2, heads, dim])
+  // The dimension 2 represents K/V selection (0=K, 1=V)
+  iree_hal_buffer_view_t *cacheView_ = nullptr;
 
   // Pre-allocated decode input buffers (avoid allocation per step)
   iree_hal_buffer_t *tokenBuffer_ = nullptr;

@@ -1,34 +1,91 @@
 #!/usr/bin/env python3
 """
-Export LLM with contiguous cache layout for efficient updates.
+Export LLM with contiguous cache layout and in-place updates.
 
-Key insight: Change cache layout from [layers, batch, heads, seq, dim] 
-to [seq, layers, heads, dim] so that updating position `pos` is a single
-contiguous memory write.
+Key insights:
+1. Cache layout: [seq, layers, 2, heads, dim] for contiguous memory access
+2. In-place update: Write K/V to cache BEFORE attention, giving power-of-2 dimensions
+3. Decode attention is [1, heads, 1, cache_len] instead of [1, heads, 1, cache_len+1]
 
-This allows O(1) cache update with one H2D transfer instead of 512 scattered writes.
+This gives O(1) cache update inside the kernel with power-of-2 attention dimensions.
 """
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    """Apply rotary position embeddings to Q and K."""
+    cos = cos.unsqueeze(1)  # [batch, 1, seq, dim]
+    sin = sin.unsqueeze(1)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+def rotate_half(x):
+    """Rotate half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def repeat_kv(hidden_states, n_rep):
+    """Repeat KV heads to match query heads for GQA."""
+    batch, num_kv_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_kv_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
+
+
+class RotaryEmbedding(nn.Module):
+    """Precompute rotary embeddings for all positions."""
+    
+    def __init__(self, dim, max_position_embeddings=2048, base=500000.0):
+        super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        
+        inv_freq = 1.0 / (
+            self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        # Precompute cos/sin for all positions
+        t = torch.arange(max_position_embeddings, dtype=torch.float32)
+        freqs = torch.outer(t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+    
+    def forward(self, position_ids):
+        # position_ids: [batch, seq_len]
+        cos = self.cos_cached[position_ids]  # [batch, seq_len, dim]
+        sin = self.sin_cached[position_ids]
+        return cos, sin
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="NousResearch/Meta-Llama-3.1-8B-Instruct")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--max-seq-len", type=int, default=2048)
-    parser.add_argument("--prefill-len", type=int, default=512)
+    parser.add_argument("--cache-len", type=int, default=512,
+                        help="Cache length (power of 2 recommended)")
     parser.add_argument("--dtype", default="float16")
     args = parser.parse_args()
     
-    from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, DynamicCache
+    from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
     from iree.turbine.aot import FxProgramsBuilder, export, externalize_module_parameters, save_module_parameters
-    from safetensors.torch import save_file
     
     print(f"Loading model: {args.model}")
     dtype = getattr(torch, args.dtype)
@@ -38,7 +95,7 @@ def main():
         args.model, 
         torch_dtype=dtype, 
         trust_remote_code=True,
-        attn_implementation="eager",  # SDPA not supported by torch-mlir yet
+        attn_implementation="sdpa",  # Use SDPA for fused attention
     )
     model.eval()
     
@@ -46,86 +103,79 @@ def main():
     num_heads = config.num_attention_heads
     num_kv_heads = getattr(config, 'num_key_value_heads', num_heads)
     head_dim = config.hidden_size // num_heads
+    hidden_size = config.hidden_size
+    num_kv_groups = num_heads // num_kv_heads
     
-    print(f"Model: {num_layers} layers, {num_kv_heads} KV heads, {head_dim} head_dim")
+    cache_len = args.cache_len
+    
+    print(f"Model: {num_layers} layers, {num_heads} Q heads, {num_kv_heads} KV heads, {head_dim} head_dim")
+    print(f"Cache length: {cache_len} (power of 2: {cache_len & (cache_len - 1) == 0})")
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # max_cache_len = prefill_len (power of 2 for GPU-friendly prefill)
-    # During decode: attention over 512 past + 1 current = 513 positions
-    # The 513 only affects attention matmul, not the large FFN operations
-    max_cache_len = args.prefill_len
+    # Cache layout: [seq, layers, 2, heads, dim] where 2 = K and V stacked
+    cache_shape = (cache_len, num_layers, 2, num_kv_heads, head_dim)
     
-    # NEW LAYOUT: [seq, layers, heads, dim] for contiguous updates
-    # When updating position pos, we write cache[pos, :, :, :] = 64KB contiguous
-    cache_shape_contiguous = (max_cache_len, num_layers, num_kv_heads, head_dim)
+    print(f"Cache shape: {cache_shape}")
+    cache_size_bytes = math.prod(cache_shape) * 2  # f16
+    print(f"Cache size: {cache_size_bytes / 1024 / 1024:.1f} MB")
     
-    # OLD LAYOUT for model: [layers, batch, heads, seq, dim]
-    cache_shape_model = (num_layers, 1, num_kv_heads, max_cache_len, head_dim)
-    
-    print(f"Cache shapes:")
-    print(f"  Contiguous (storage): {cache_shape_contiguous}")
-    print(f"  Model (transposed):   {cache_shape_model}")
-    
-    class ContiguousCacheLLM(nn.Module):
-        """LLM wrapper with contiguous cache layout."""
+    class InPlaceCacheLLM(nn.Module):
+        """LLM with in-place cache update for power-of-2 attention dimensions."""
         
-        def __init__(self, model, num_layers, num_kv_heads, head_dim, max_cache_len, dtype):
+        def __init__(self, hf_model, config, cache_len, dtype):
             super().__init__()
-            self.model = model
-            self.num_layers = num_layers
-            self.num_kv_heads = num_kv_heads
-            self.head_dim = head_dim
-            self.max_cache_len = max_cache_len
+            self.hf_model = hf_model
+            self.cache_len = cache_len
             self.dtype = dtype
-        
-        def _contiguous_to_model(self, cache_k, cache_v):
-            """Convert contiguous layout to model layout.
             
-            Contiguous: [seq, layers, heads, dim]
-            Model:      [layers, 1, heads, seq, dim]
-            """
-            # cache_k: [seq, layers, heads, dim]
-            # Need: [layers, 1, heads, seq, dim]
-            # permute: (0,1,2,3) -> (1, 2, 0, 3) gives [layers, heads, seq, dim]
-            cache_k_model = cache_k.permute(1, 2, 0, 3).unsqueeze(1)  # [layers, 1, heads, seq, dim]
-            cache_v_model = cache_v.permute(1, 2, 0, 3).unsqueeze(1)
-            return cache_k_model, cache_v_model
-        
-        def _model_to_contiguous(self, cache_k_model, cache_v_model):
-            """Convert model layout to contiguous layout.
+            self.num_layers = config.num_hidden_layers
+            self.num_heads = config.num_attention_heads
+            self.num_kv_heads = getattr(config, 'num_key_value_heads', self.num_heads)
+            self.head_dim = config.hidden_size // self.num_heads
+            self.hidden_size = config.hidden_size
+            self.num_kv_groups = self.num_heads // self.num_kv_heads
             
-            Model:      [layers, 1, heads, seq, dim]
-            Contiguous: [seq, layers, heads, dim]
-            """
-            # cache_k_model: [layers, 1, heads, seq, dim]
-            # Need: [seq, layers, heads, dim]
-            cache_k = cache_k_model.squeeze(1).permute(2, 0, 1, 3)  # [seq, layers, heads, dim]
-            cache_v = cache_v_model.squeeze(1).permute(2, 0, 1, 3)
-            return cache_k, cache_v
+            # RoPE
+            rope_theta = getattr(config, 'rope_theta', 500000.0)
+            self.rotary_emb = RotaryEmbedding(
+                self.head_dim,
+                max_position_embeddings=cache_len * 4,
+                base=rope_theta
+            )
+        
+        def _get_layer_components(self, layer_idx):
+            """Get components from HF model layer."""
+            layer = self.hf_model.model.layers[layer_idx]
+            return {
+                'input_layernorm': layer.input_layernorm,
+                'q_proj': layer.self_attn.q_proj,
+                'k_proj': layer.self_attn.k_proj,
+                'v_proj': layer.self_attn.v_proj,
+                'o_proj': layer.self_attn.o_proj,
+                'post_attention_layernorm': layer.post_attention_layernorm,
+                'mlp': layer.mlp,
+            }
         
         def prefill(self, input_ids, attention_mask):
             """
-            Prefill with contiguous cache output.
+            Prefill using HF model, return cache in contiguous layout.
             
             Args:
-                input_ids: [1, max_cache_len] - padded to max_cache_len
-                attention_mask: [1, max_cache_len] - 1 for valid tokens, 0 for padding
+                input_ids: [1, cache_len]
+                attention_mask: [1, cache_len]
             
             Returns:
-                logits: [1, max_cache_len, vocab]
-                cache_k: [max_cache_len, layers, heads, dim] - contiguous layout
-                cache_v: [max_cache_len, layers, heads, dim] - contiguous layout
+                logits: [1, cache_len, vocab_size]
+                cache: [cache_len, layers, 2, kv_heads, head_dim]
             """
-            # Create position IDs matching input length
             seq_len = input_ids.shape[1]
-            position_ids = torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0)
+            position_ids = torch.arange(seq_len, dtype=torch.long, device=input_ids.device).unsqueeze(0)
             
-            # Run model
+            # Use HF model directly for prefill
             with torch.no_grad():
-                outputs = self.model(
+                outputs = self.hf_model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -139,134 +189,188 @@ def main():
             cache_k_list = []
             cache_v_list = []
             for layer_kv in past_kv:
-                cache_k_list.append(layer_kv[0])  # [1, heads, seq, dim]
+                cache_k_list.append(layer_kv[0])  # [1, kv_heads, seq, dim]
                 cache_v_list.append(layer_kv[1])
             
-            cache_k_model = torch.stack(cache_k_list, dim=0)  # [layers, 1, heads, seq, dim]
+            cache_k_model = torch.stack(cache_k_list, dim=0)  # [layers, 1, kv_heads, seq, dim]
             cache_v_model = torch.stack(cache_v_list, dim=0)
             
-            # Convert to contiguous layout
-            cache_k, cache_v = self._model_to_contiguous(cache_k_model, cache_v_model)
+            # Convert to contiguous layout: [seq, layers, kv_heads, dim]
+            cache_k = cache_k_model.squeeze(1).permute(2, 0, 1, 3)
+            cache_v = cache_v_model.squeeze(1).permute(2, 0, 1, 3)
             
-            # Zero out positions where attention_mask is 0
-            # attention_mask: [1, prefill_len], need to broadcast to [prefill_len, layers, heads, dim]
-            valid_mask = attention_mask.squeeze(0).view(-1, 1, 1, 1).to(self.dtype)
-            cache_k = cache_k * valid_mask
-            cache_v = cache_v * valid_mask
+            # Stack K and V: [seq, layers, 2, kv_heads, dim]
+            cache = torch.stack([cache_k, cache_v], dim=2)
             
-            return logits, cache_k, cache_v
+            # Zero out padding positions
+            valid_mask = attention_mask.squeeze(0).view(-1, 1, 1, 1, 1).to(self.dtype)
+            cache = cache * valid_mask
+            
+            return logits, cache
         
-        def decode_step(self, token, position_id, attention_mask, cache_k, cache_v):
+        def decode_step(self, token, position_id, cache, valid_len):
             """
-            Decode step with contiguous cache.
+            Decode with in-place cache update using mask-based writes.
             
             Args:
                 token: [1, 1]
-                position_id: [1, 1] - position of the current token
-                attention_mask: [1, max_cache_len+1] - for past positions + current token
-                cache_k: [max_cache_len, layers, heads, dim] - contiguous, FULL cache
-                cache_v: [max_cache_len, layers, heads, dim] - contiguous, FULL cache
+                position_id: [1, 1]
+                cache: [cache_len, layers, 2, kv_heads, head_dim]
+                valid_len: [1, 1] - number of valid positions (for attention mask)
             
             Returns:
-                logits: [1, 1, vocab]
-                new_kv: [1, 2, layers, heads, dim] - K and V stacked, contiguous!
+                logits: [1, 1, vocab_size]
+                cache: [cache_len, layers, 2, kv_heads, head_dim] - updated
             """
-            # Convert cache to model layout: [layers, 1, heads, seq, dim]
-            cache_k_model, cache_v_model = self._contiguous_to_model(cache_k, cache_v)
+            batch_size = 1
+            seq_len = 1
             
-            # Build DynamicCache from tensors  
-            past_key_values = DynamicCache()
+            # Get write position (circular buffer)
+            write_pos = position_id.squeeze() % self.cache_len
+            
+            # Create position mask for cache update (one-hot)
+            pos_mask = F.one_hot(write_pos.long(), num_classes=self.cache_len).to(self.dtype)
+            pos_mask = pos_mask.view(-1, 1, 1)  # [cache_len, 1, 1]
+            
+            # Embeddings
+            hidden_states = self.hf_model.model.embed_tokens(token)
+            
+            # RoPE for current position
+            cos, sin = self.rotary_emb(position_id)
+            cos = cos.to(self.dtype)
+            sin = sin.to(self.dtype)
+            
+            # Create attention mask for decode
+            # Only attend to positions [0, valid_len)
+            positions = torch.arange(self.cache_len, device=token.device)
+            valid_positions = positions < valid_len.squeeze()
+            attn_mask = torch.zeros(self.cache_len, dtype=self.dtype, device=token.device)
+            attn_mask = attn_mask.masked_fill(~valid_positions, float('-inf'))
+            attn_mask = attn_mask.view(1, 1, 1, self.cache_len)
+            
+            # Collect updated layer caches
+            layer_caches_k = []
+            layer_caches_v = []
+            
             for layer_idx in range(self.num_layers):
-                past_key_values.update(
-                    cache_k_model[layer_idx],  # [1, heads, max_cache_len, dim]
-                    cache_v_model[layer_idx],
-                    layer_idx
+                components = self._get_layer_components(layer_idx)
+                
+                # Pre-attention norm
+                normed = components['input_layernorm'](hidden_states)
+                
+                # Squeeze to [batch, hidden] for better codegen on decode (avoids [1,1,hidden] matmuls)
+                normed_2d = normed.squeeze(1)  # [1, 4096]
+                
+                # Q, K, V projections with 2D input
+                q = components['q_proj'](normed_2d)  # [1, 4096]
+                k = components['k_proj'](normed_2d)  # [1, 1024]
+                v = components['v_proj'](normed_2d)  # [1, 1024]
+                
+                # Reshape to attention format
+                q = q.view(batch_size, self.num_heads, self.head_dim).unsqueeze(2)  # [1, 32, 1, 128]
+                k = k.view(batch_size, self.num_kv_heads, self.head_dim).unsqueeze(2)  # [1, 8, 1, 128]
+                v = v.view(batch_size, self.num_kv_heads, self.head_dim).unsqueeze(2)  # [1, 8, 1, 128]
+                
+                # Apply RoPE
+                q, k = apply_rotary_pos_emb(q, k, cos, sin)
+                
+                # Get new K, V
+                new_k = k.squeeze(0).squeeze(1)  # [kv_heads, dim]
+                new_v = v.squeeze(0).squeeze(1)
+                
+                # Get current layer's cache
+                layer_cache_k = cache[:, layer_idx, 0, :, :]  # [cache_len, kv_heads, dim]
+                layer_cache_v = cache[:, layer_idx, 1, :, :]
+                
+                # Update cache using mask (traceable!)
+                layer_cache_k = layer_cache_k * (1 - pos_mask) + new_k.unsqueeze(0) * pos_mask
+                layer_cache_v = layer_cache_v * (1 - pos_mask) + new_v.unsqueeze(0) * pos_mask
+                
+                # Store for rebuilding cache
+                layer_caches_k.append(layer_cache_k)
+                layer_caches_v.append(layer_cache_v)
+                
+                # Prepare for attention
+                k_full = layer_cache_k.unsqueeze(0).transpose(1, 2)  # [1, kv_heads, cache_len, dim]
+                v_full = layer_cache_v.unsqueeze(0).transpose(1, 2)
+                
+                # Expand for GQA
+                k_expanded = repeat_kv(k_full, self.num_kv_groups)
+                v_expanded = repeat_kv(v_full, self.num_kv_groups)
+                
+                # Attention: [1, heads, 1, cache_len] - power of 2!
+                # Use SDPA for fused attention kernel
+                attn_output = F.scaled_dot_product_attention(
+                    q, k_expanded, v_expanded,
+                    attn_mask=attn_mask,
+                    scale=1.0 / math.sqrt(self.head_dim),
                 )
+                
+                # Output projection - squeeze to 2D for better codegen
+                attn_output = attn_output.squeeze(2)  # [1, 32, 128]
+                attn_output = attn_output.view(batch_size, self.hidden_size)  # [1, 4096]
+                attn_output = components['o_proj'](attn_output)  # [1, 4096]
+                
+                # Residual (squeeze hidden_states to 2D)
+                hidden_states = hidden_states.squeeze(1) + attn_output  # [1, 4096]
+                
+                # FFN with 2D input
+                normed = components['post_attention_layernorm'](hidden_states.unsqueeze(1)).squeeze(1)
+                hidden_states = hidden_states + components['mlp'](normed.unsqueeze(1)).squeeze(1)
             
-            with torch.no_grad():
-                outputs = self.model(
-                    input_ids=token,
-                    attention_mask=attention_mask,
-                    position_ids=position_id,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
+            # Rebuild cache
+            cache_k_stacked = torch.stack(layer_caches_k, dim=1)  # [cache_len, layers, kv_heads, dim]
+            cache_v_stacked = torch.stack(layer_caches_v, dim=1)
+            cache = torch.stack([cache_k_stacked, cache_v_stacked], dim=2)  # [cache_len, layers, 2, kv_heads, dim]
             
-            logits = outputs.logits
-            new_past_kv = outputs.past_key_values
+            # Final norm and LM head (restore to 3D for compatibility)
+            hidden_states = hidden_states.unsqueeze(1)  # [1, 1, 4096]
+            hidden_states = self.hf_model.model.norm(hidden_states)
+            logits = self.hf_model.lm_head(hidden_states)
             
-            # Extract new KV for the current position
-            # The model appends to cache, so new entry is at position -1
-            new_k_list = []
-            new_v_list = []
-            for layer_idx in range(self.num_layers):
-                new_k_list.append(new_past_kv.key_cache[layer_idx][:, :, -1:, :])  # [1, heads, 1, dim]
-                new_v_list.append(new_past_kv.value_cache[layer_idx][:, :, -1:, :])
-            
-            new_k_model = torch.stack(new_k_list, dim=0)  # [layers, 1, heads, 1, dim]
-            new_v_model = torch.stack(new_v_list, dim=0)
-            
-            # Convert to contiguous layout: [1, layers, heads, dim]
-            new_k = new_k_model.squeeze(1).squeeze(2).permute(1, 0, 2)  # [1, layers, heads, dim]
-            new_v = new_v_model.squeeze(1).squeeze(2).permute(1, 0, 2)
-            
-            # Stack k and v together for single transfer: [1, 2, layers, heads, dim]
-            new_kv = torch.stack([new_k, new_v], dim=1)  # [1, 2, layers, heads, dim]
-            
-            return logits, new_kv
+            return logits, cache
     
-    llm = ContiguousCacheLLM(model, num_layers, num_kv_heads, head_dim, max_cache_len, dtype)
+    llm = InPlaceCacheLLM(model, config, cache_len, dtype)
     
     # =========== Test ===========
     print("\n=== Testing Module ===")
     
-    test_tokens = torch.randint(0, config.vocab_size, (1, 10), dtype=torch.int64)
-    padded = torch.zeros(1, max_cache_len, dtype=torch.int64)
-    padded[0, :10] = test_tokens[0]
-    attention_mask_prefill = torch.zeros(1, max_cache_len, dtype=torch.long)
-    attention_mask_prefill[0, :10] = 1
+    test_len = 10
+    test_tokens = torch.randint(0, config.vocab_size, (1, test_len), dtype=torch.int64)
+    padded = torch.zeros(1, cache_len, dtype=torch.int64)
+    padded[0, :test_len] = test_tokens[0]
+    attention_mask = torch.zeros(1, cache_len, dtype=torch.long)
+    attention_mask[0, :test_len] = 1
     
     with torch.no_grad():
-        logits, cache_k, cache_v = llm.prefill(padded, attention_mask_prefill)
+        logits, cache = llm.prefill(padded, attention_mask)
     
-    print(f"Prefill: logits {logits.shape}")
-    print(f"  cache_k (contiguous): {cache_k.shape}")
-    print(f"  Cache K at pos 0-9 max: {cache_k[:10].abs().max().item():.2f}")
-    print(f"  Cache K at pos 10+ max: {cache_k[10:].abs().max().item():.4f}")
+    print(f"Prefill: logits {logits.shape}, cache {cache.shape}")
+    print(f"  Cache at pos 0-9 max: {cache[:10].abs().max().item():.2f}")
+    print(f"  Cache at pos 10+ max: {cache[10:].abs().max().item():.4f}")
     
     # Test decode
-    # After prefill of 10 tokens, we're at position 10
     decode_token = torch.randint(0, config.vocab_size, (1, 1), dtype=torch.int64)
-    position_id = torch.tensor([[10]], dtype=torch.int64)
-    # Attention mask: [1, max_cache_len+1] - 1s for positions 0-10 (10 past + 1 current)
-    attention_mask = torch.zeros(1, max_cache_len + 1, dtype=torch.long)
-    attention_mask[0, :11] = 1  # Valid for first 11 positions (0-10)
+    position_id = torch.tensor([[test_len]], dtype=torch.int64)
+    valid_len = torch.tensor([[test_len + 1]], dtype=torch.int64)
     
     with torch.no_grad():
-        logits, new_kv = llm.decode_step(decode_token, position_id, attention_mask, cache_k, cache_v)
+        logits, cache_updated = llm.decode_step(decode_token, position_id, cache, valid_len)
     
-    print(f"Decode: logits {logits.shape}, new_kv {new_kv.shape}")
-    print(f"  new_kv contains: K[1, {num_layers}, {num_kv_heads}, {head_dim}] + V[same]")
-    print(f"  Total new_kv size: {new_kv.numel() * 2} bytes = {new_kv.numel() * 2 / 1024:.1f} KB")
-    
-    # Verify update is contiguous
-    pos = 10
-    slice_size = num_layers * num_kv_heads * head_dim * 2  # K and V
-    print(f"\n  Cache update at pos {pos}:")
-    print(f"    Contiguous slice size: {slice_size} elements = {slice_size * 2 / 1024:.1f} KB")
-    print(f"    Single H2D transfer: YES!")
+    print(f"Decode: logits {logits.shape}")
+    print(f"  Decode attention: [1, {num_heads}, 1, {cache_len}] - POWER OF 2!")
+    print(f"  Cache at pos 10 updated: {cache_updated[10].abs().max().item():.2f}")
     
     # =========== Export to MLIR ===========
     print("\n=== Exporting to MLIR ===")
     
-    # Externalize parameters so MLIR references them instead of embedding
     externalize_module_parameters(llm)
     
     fxb = FxProgramsBuilder(llm)
     
-    # Prefill example inputs
-    prefill_input_ids = torch.zeros((1, max_cache_len), dtype=torch.int64)
-    prefill_attention_mask = torch.ones((1, max_cache_len), dtype=torch.int64)
+    # Prefill inputs
+    prefill_input_ids = torch.zeros((1, cache_len), dtype=torch.int64)
+    prefill_attention_mask = torch.ones((1, cache_len), dtype=torch.int64)
     
     @fxb.export_program(
         name="prefill",
@@ -275,19 +379,18 @@ def main():
     def prefill_export(module, input_ids, attention_mask):
         return module.prefill(input_ids, attention_mask)
     
-    # Decode step example inputs - CONTIGUOUS LAYOUT
+    # Decode inputs
     decode_token = torch.zeros((1, 1), dtype=torch.int64)
     decode_position_id = torch.zeros((1, 1), dtype=torch.int64)
-    decode_attention_mask = torch.ones((1, max_cache_len + 1), dtype=torch.int64)  # +1 for current token
-    decode_cache_k = torch.zeros(cache_shape_contiguous, dtype=dtype)  # [seq, layers, heads, dim]
-    decode_cache_v = torch.zeros(cache_shape_contiguous, dtype=dtype)
+    decode_cache = torch.zeros(cache_shape, dtype=dtype)
+    decode_valid_len = torch.ones((1, 1), dtype=torch.int64)
     
     @fxb.export_program(
         name="decode_step",
-        args=(decode_token, decode_position_id, decode_attention_mask, decode_cache_k, decode_cache_v),
+        args=(decode_token, decode_position_id, decode_cache, decode_valid_len),
     )
-    def decode_export(module, token, position_id, attention_mask, cache_k, cache_v):
-        return module.decode_step(token, position_id, attention_mask, cache_k, cache_v)
+    def decode_export(module, token, position_id, cache, valid_len):
+        return module.decode_step(token, position_id, cache, valid_len)
     
     print("Tracing programs...")
     output = export(fxb, import_symbolic_shape_expressions=True)
@@ -296,8 +399,8 @@ def main():
     output.save_mlir(str(mlir_path))
     print(f"Saved MLIR to {mlir_path}")
     
-    # =========== Save Weights as IRPA ===========
-    print("\n=== Saving Weights as IRPA ===")
+    # =========== Save Weights ===========
+    print("\n=== Saving Weights ===")
     
     irpa_path = output_dir / "model.irpa"
     save_module_parameters(str(irpa_path), llm)
@@ -305,24 +408,18 @@ def main():
     
     # =========== Save Config ===========
     config_dict = {
-        "model_type": "llama_contiguous",
+        "model_type": "llama_inplace_cache",
         "hf_model": args.model,
         "num_layers": num_layers,
         "num_heads": num_heads,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
+        "hidden_size": hidden_size,
         "vocab_size": config.vocab_size,
-        "max_seq_len": args.max_seq_len,
-        "prefill_len": max_cache_len,  # Prefill input length = cache length = 512
-        "max_cache_len": max_cache_len,
-        "attention_mask_len": max_cache_len + 1,  # For decode: 512 past + 1 current = 513
+        "cache_len": cache_len,
         "dtype": args.dtype,
-        "cache_layout": "contiguous",
-        "cache_shape": list(cache_shape_contiguous),
-        "new_kv_shape": [1, 2, num_layers, num_kv_heads, head_dim],
-        "vmfb_path": "model.vmfb",
-        "irpa_path": "model.irpa",
-        "tokenizer_path": "tokenizer.json",
+        "cache_layout": "inplace_contiguous",
+        "cache_shape": list(cache_shape),
     }
     
     config_path = output_dir / "config.json"
@@ -336,15 +433,12 @@ def main():
     print(f"Saved tokenizer")
     
     print("\n=== EXPORT COMPLETE ===")
-    print(f"\nKey benefits of contiguous cache layout:")
-    print(f"  - Cache update: 1 H2D transfer of {slice_size * 2 / 1024:.1f} KB")
-    print(f"  - vs. old layout: 512 H2D transfers of 256 bytes each")
-    print(f"  - Expected speedup: ~10x for cache update")
-    print(f"\nNext steps:")
-    print(f"  1. Compile MLIR: iree-compile {mlir_path} -o {output_dir}/model.vmfb --iree-hal-target-backends=rocm")
-    print(f"  2. Update C++ backend to use contiguous cache layout")
+    print(f"\nDimension summary:")
+    print(f"  Prefill attention: [{cache_len}, {cache_len}]")
+    print(f"  Decode attention:  [1, {cache_len}] - POWER OF 2!")
+    print(f"  Cache: {cache_shape}")
+    print(f"\nNext: iree-compile {mlir_path} -o {output_dir}/model.vmfb --iree-hal-target-backends=rocm")
 
 
 if __name__ == "__main__":
     main()
-
