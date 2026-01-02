@@ -63,10 +63,21 @@ struct LLMModelConfig {
   int maxCacheLen = 512;      // Maximum cache length
   int attentionMaskLen = 513; // prefillLen + 1
   
+  // Contiguous cache layout fields
+  std::string cacheLayout = "model";    // "model" or "contiguous"
+  std::vector<int> cacheShape;          // [seq, layers, heads, dim] for contiguous
+  std::vector<int> newKVShape;          // [1, 2, layers, heads, dim] for contiguous output
+  
   /// Check if this is an incremental model (not paged attention)
   bool isIncremental() const {
     return modelType == "llama_incremental" || 
-           modelType == "tinyllama_incremental";
+           modelType == "tinyllama_incremental" ||
+           modelType == "llama_contiguous";
+  }
+  
+  /// Check if this model uses contiguous cache layout
+  bool isContiguous() const {
+    return cacheLayout == "contiguous" || modelType == "llama_contiguous";
   }
 
   /// Load configuration from a JSON file.
@@ -181,6 +192,15 @@ private:
   
   // Current sequence position for incremental decode
   int currentSeqPos_ = 0;
+  
+  // Pre-allocated contiguous decode buffers (to avoid allocation overhead)
+  iree_hal_buffer_t *contiguousTokenBuffer_ = nullptr;
+  iree_hal_buffer_view_t *contiguousTokenView_ = nullptr;
+  iree_hal_buffer_t *contiguousPosBuffer_ = nullptr;
+  iree_hal_buffer_view_t *contiguousPosView_ = nullptr;
+  iree_hal_buffer_t *contiguousMaskBuffer_ = nullptr;
+  iree_hal_buffer_view_t *contiguousMaskView_ = nullptr;
+  bool contiguousBuffersInitialized_ = false;
 
   // Host allocator
   iree_allocator_t hostAllocator_;

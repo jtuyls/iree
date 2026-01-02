@@ -127,6 +127,22 @@ LLMModelConfig::loadFromFile(llvm::StringRef path) {
     if (auto v = obj->getInteger("attention_mask_len"))
       config.attentionMaskLen = *v;
     
+    // Contiguous cache layout fields
+    if (auto s = obj->getString("cache_layout"))
+      config.cacheLayout = s->str();
+    if (auto *arr = obj->getArray("cache_shape")) {
+      for (const auto &v : *arr) {
+        if (auto i = v.getAsInteger())
+          config.cacheShape.push_back(*i);
+      }
+    }
+    if (auto *arr = obj->getArray("new_kv_shape")) {
+      for (const auto &v : *arr) {
+        if (auto i = v.getAsInteger())
+          config.newKVShape.push_back(*i);
+      }
+    }
+    
     // Also check llm_assist section for incremental fields
     if (auto *llmAssist = obj->getObject("llm_assist")) {
       if (auto v = llmAssist->getInteger("prefill_len"))
@@ -775,17 +791,25 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
       ? modelConfig_.maxCacheLen 
       : modelConfig_.contextLength;
 
-  // Prefill phase
+  // Prefill phase with timing
+  auto prefillStart = std::chrono::steady_clock::now();
   auto nextTokenOrErr = runPrefill(promptTokens, seqLen);
   if (!nextTokenOrErr) {
     return nextTokenOrErr.takeError();
   }
+  auto prefillEnd = std::chrono::steady_clock::now();
+  auto prefillMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       prefillEnd - prefillStart).count();
+  llvm::errs() << "IREEBackend: Prefill " << seqLen << " tokens in " 
+               << prefillMs << " ms\n";
 
   int64_t nextToken = *nextTokenOrErr;
   allTokens.push_back(nextToken);
 
-  // Decode loop
+  // Decode loop with timing
   int currentSeqLen = seqLen + 1; // After prefill, we've added one token
+  auto decodeStart = std::chrono::steady_clock::now();
+  int decodeCount = 0;
   
   for (int i = 0; i < maxNewTokens - 1; ++i) {
     // Check for EOS
@@ -812,10 +836,20 @@ IREEBackend::generateTokens(llvm::ArrayRef<int64_t> promptTokens,
     nextToken = *nextTokenOrErr;
     allTokens.push_back(nextToken);
     ++currentSeqLen;
+    ++decodeCount;
   }
+  
+  auto decodeEnd = std::chrono::steady_clock::now();
+  auto decodeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      decodeEnd - decodeStart).count();
+  
+  double tokPerSec = decodeCount > 0 ? (decodeCount * 1000.0 / decodeMs) : 0;
+  double msPerTok = decodeCount > 0 ? (double)decodeMs / decodeCount : 0;
 
-  llvm::errs() << "IREEBackend::generateTokens: Generated " 
-               << allTokens.size() - seqLen << " tokens\n";
+  llvm::errs() << "IREEBackend: Generated " << decodeCount << " tokens in " 
+               << decodeMs << " ms (" << llvm::format("%.1f", msPerTok)
+               << " ms/tok, " << llvm::format("%.1f", tokPerSec) << " tok/s)\n";
+  
   return allTokens;
 }
 
@@ -830,11 +864,33 @@ runPrefillIncremental(IREEBackend *backend, llvm::ArrayRef<int64_t> tokens, int 
                       const LLMModelConfig &config,
                       iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView);
 
+// Forward declarations for contiguous cache model methods
+llvm::Expected<int64_t>
+runPrefillContiguous(IREEBackend *backend, llvm::ArrayRef<int64_t> tokens, int seqLen,
+                     iree_vm_context_t *context, iree_vm_function_t &prefillFn,
+                     iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                     const LLMModelConfig &config,
+                     iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView);
+
+llvm::Expected<int64_t>
+runDecodeContiguous(IREEBackend *backend, int64_t token, int seqLen,
+                    iree_vm_context_t *context, iree_vm_function_t &decodeFn,
+                    iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                    const LLMModelConfig &config,
+                    iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView);
+
 llvm::Expected<int64_t>
 IREEBackend::runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen) {
   auto prefillStart = std::chrono::high_resolution_clock::now();
   if (kEnableDebugOutput)
     llvm::errs() << "IREEBackend::runPrefill: Starting with seqLen=" << seqLen << "\n";
+  
+  // Dispatch to contiguous cache model path if needed
+  if (modelConfig_.isContiguous()) {
+    return runPrefillContiguous(this, tokens, seqLen, context_, prefillFn_,
+                                device_, hostAllocator_, modelConfig_,
+                                cacheKView_, cacheVView_);
+  }
   
   // Dispatch to incremental model path if needed
   if (modelConfig_.isIncremental()) {
@@ -1167,6 +1223,13 @@ llvm::Expected<int64_t> IREEBackend::runDecode(int64_t token, int seqLen,
                  << "token=" << token << ", seqLen=" << seqLen << ", startPos=" << startPos << "\n";
   }
   decodeCallCount++;
+  
+  // Dispatch to contiguous cache model if needed
+  if (modelConfig_.isContiguous()) {
+    return runDecodeContiguous(this, token, seqLen, context_, decodeFn_,
+                               device_, hostAllocator_, modelConfig_,
+                               cacheKView_, cacheVView_);
+  }
   
   // Dispatch to incremental model if needed
   if (modelConfig_.isIncremental()) {
@@ -1708,7 +1771,6 @@ runDecodeIncremental(IREEBackend *backend, int64_t token, int seqLen,
     // Position to update: seqLen - 1 (the position where we just generated a token)
     int pos = seqLen - 1;
     
-    // Get cache buffer and new_k buffer
     iree_hal_buffer_t *cacheKBuffer = iree_hal_buffer_view_buffer(cacheKView);
     iree_hal_buffer_t *newKBuffer = iree_hal_buffer_view_buffer(newKView);
     iree_hal_buffer_t *cacheVBuffer = iree_hal_buffer_view_buffer(cacheVView);
@@ -1719,52 +1781,79 @@ runDecodeIncremental(IREEBackend *backend, int64_t token, int seqLen,
     int headDim = config.headDim;
     int maxCacheLen = config.maxCacheLen;
     
-    // Row-major layout for [layers, batch, heads, seq, dim]:
-    // - dim varies fastest (stride = 1)
-    // - seq stride = headDim
-    // - heads stride = maxCacheLen * headDim
-    // - batch stride = numKVHeads * maxCacheLen * headDim
-    // - layer stride = 1 * numKVHeads * maxCacheLen * headDim
-    
     size_t elementSize = sizeof(uint16_t);
-    size_t layerStrideCache = numKVHeads * maxCacheLen * headDim * elementSize;
-    size_t headStrideCache = maxCacheLen * headDim * elementSize;
-    size_t posStride = headDim * elementSize;
+    size_t newKVSize = numLayers * numKVHeads * headDim * elementSize;
+    size_t totalCacheSize = numLayers * numKVHeads * maxCacheLen * headDim * elementSize;
     
-    // For new_k: [layers, 1, heads, 1, dim]
-    size_t layerStrideNew = numKVHeads * headDim * elementSize;
-    size_t headStrideNew = headDim * elementSize;
+    // OPTIMIZATION v2: Maintain full host cache, single H2D per decode
+    // - 2 D2H for new_k, new_v (64KB each)
+    // - Scatter update on host
+    // - 1 H2D for full cache (64MB each for K and V)
+    // This trades bandwidth for reduced call overhead (2 transfers vs 512)
     
-    // Copy new_k[l,0,h,0,:] to cache_k[l,0,h,pos,:] for each layer and head
-    std::vector<uint16_t> headData(headDim);
+    // Persistent host cache buffers
+    thread_local std::vector<uint16_t> hostCacheK;
+    thread_local std::vector<uint16_t> hostCacheV;
+    thread_local std::vector<uint16_t> newKHost;
+    thread_local std::vector<uint16_t> newVHost;
+    thread_local bool cacheInitialized = false;
     
+    size_t cacheElements = numLayers * numKVHeads * maxCacheLen * headDim;
+    size_t newKVElements = numLayers * numKVHeads * headDim;
+    
+    // Initialize host cache on first call (copy from device)
+    if (!cacheInitialized || hostCacheK.size() != cacheElements) {
+      hostCacheK.resize(cacheElements);
+      hostCacheV.resize(cacheElements);
+      newKHost.resize(newKVElements);
+      newVHost.resize(newKVElements);
+      
+      // Initial D2H of full cache
+      iree_hal_device_transfer_d2h(device, cacheKBuffer, 0,
+                                    hostCacheK.data(), totalCacheSize,
+                                    IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
+                                    iree_infinite_timeout());
+      iree_hal_device_transfer_d2h(device, cacheVBuffer, 0,
+                                    hostCacheV.data(), totalCacheSize,
+                                    IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
+                                    iree_infinite_timeout());
+      cacheInitialized = true;
+    }
+    
+    // Step 1: D2H new_k and new_v (small: 64KB each)
+    iree_hal_device_transfer_d2h(device, newKBuffer, 0,
+                                  newKHost.data(), newKVSize,
+                                  IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
+                                  iree_infinite_timeout());
+    iree_hal_device_transfer_d2h(device, newVBuffer, 0,
+                                  newVHost.data(), newKVSize,
+                                  IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
+                                  iree_infinite_timeout());
+    
+    // Step 2: Scatter update on host (fast, ~0.2ms)
+    // Update hostCacheK/V at position pos for all layers and heads
     for (int layer = 0; layer < numLayers; ++layer) {
       for (int head = 0; head < numKVHeads; ++head) {
-        // Source offset in new_k
-        size_t newOffset = layer * layerStrideNew + head * headStrideNew;
+        size_t srcOffset = layer * numKVHeads * headDim + head * headDim;
+        size_t dstOffset = layer * numKVHeads * maxCacheLen * headDim + 
+                           head * maxCacheLen * headDim + 
+                           pos * headDim;
         
-        // Destination offset in cache_k
-        size_t cacheOffset = layer * layerStrideCache + head * headStrideCache + pos * posStride;
-        
-        // Copy K
-        iree_hal_device_transfer_d2h(device, newKBuffer, newOffset,
-                                      headData.data(), posStride,
-                                      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
-                                      iree_infinite_timeout());
-        iree_hal_device_transfer_h2d(device, headData.data(), cacheKBuffer, cacheOffset,
-                                      posStride, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
-                                      iree_infinite_timeout());
-        
-        // Copy V
-        iree_hal_device_transfer_d2h(device, newVBuffer, newOffset,
-                                      headData.data(), posStride,
-                                      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, 
-                                      iree_infinite_timeout());
-        iree_hal_device_transfer_h2d(device, headData.data(), cacheVBuffer, cacheOffset,
-                                      posStride, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
-                                      iree_infinite_timeout());
+        std::memcpy(&hostCacheK[dstOffset], &newKHost[srcOffset], headDim * elementSize);
+        std::memcpy(&hostCacheV[dstOffset], &newVHost[srcOffset], headDim * elementSize);
       }
     }
+    
+    // Step 3: H2D full cache (2 transfers of 64MB instead of 512 transfers of 256B)
+    // This reduces call overhead significantly
+    iree_hal_device_transfer_h2d(device, hostCacheK.data(), 
+                                  cacheKBuffer, 0,
+                                  totalCacheSize, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                  iree_infinite_timeout());
+    iree_hal_device_transfer_h2d(device, hostCacheV.data(), 
+                                  cacheVBuffer, 0,
+                                  totalCacheSize, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                  iree_infinite_timeout());
   }
   
   iree_vm_list_release(outputs);
@@ -1996,6 +2085,553 @@ runPrefillIncremental(IREEBackend *backend, llvm::ArrayRef<int64_t> tokens, int 
   }
   
   llvm::errs() << "IREEBackend::runPrefillIncremental: Next token = " << nextToken << "\n";
+  
+  iree_vm_list_release(outputs);
+  return nextToken;
+}
+
+//===----------------------------------------------------------------------===//
+// Contiguous Cache Model Implementation
+//===----------------------------------------------------------------------===//
+
+// Contiguous prefill: prefill(tokens[1, prefill_len], attention_mask[1, prefill_len])
+//   -> (logits[1, prefill_len, vocab], cache_k[max_cache_len, layers, heads, dim], cache_v[...])
+llvm::Expected<int64_t>
+runPrefillContiguous(IREEBackend *backend, llvm::ArrayRef<int64_t> tokens, int seqLen,
+                     iree_vm_context_t *context, iree_vm_function_t &prefillFn,
+                     iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                     const LLMModelConfig &config,
+                     iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView) {
+  llvm::errs() << "IREEBackend::runPrefillContiguous: seqLen=" << seqLen 
+               << ", prefillLen=" << config.prefillLen << "\n";
+  
+  iree_status_t status = iree_ok_status();
+  iree_hal_allocator_t *allocator = iree_hal_device_allocator(device);
+  
+  int prefillLen = config.prefillLen;
+  
+  // Pad tokens to prefill_len
+  std::vector<int64_t> paddedTokens(prefillLen, 0);
+  for (int i = 0; i < std::min(seqLen, prefillLen); ++i) {
+    paddedTokens[i] = tokens[i];
+  }
+  
+  // Create attention mask: 1 for valid positions, 0 for padding
+  std::vector<int64_t> attentionMask(prefillLen, 0);
+  for (int i = 0; i < std::min(seqLen, prefillLen); ++i) {
+    attentionMask[i] = 1;
+  }
+  
+  // 1. Create tokens buffer: [1, prefill_len]
+  iree_hal_buffer_view_t *tokensView = nullptr;
+  const iree_hal_dim_t tokensDims[] = {1, static_cast<iree_hal_dim_t>(prefillLen)};
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 2, tokensDims, IREE_HAL_ELEMENT_TYPE_INT_64,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(paddedTokens.data(), prefillLen * sizeof(int64_t)),
+      &tokensView);
+  if (!iree_status_is_ok(status)) {
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create tokens buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 2. Create attention_mask buffer: [1, prefill_len]
+  iree_hal_buffer_view_t *maskView = nullptr;
+  status = iree_hal_buffer_view_allocate_buffer_copy(
+      device, allocator, 2, tokensDims, IREE_HAL_ELEMENT_TYPE_INT_64,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+      (iree_hal_buffer_params_t){
+          .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                  IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+      },
+      iree_make_const_byte_span(attentionMask.data(), prefillLen * sizeof(int64_t)),
+      &maskView);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokensView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create attention_mask buffer: %s",
+                                   msg.c_str());
+  }
+  
+  // 3. Build input list
+  iree_vm_list_t *inputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 2,
+                               hostAllocator, &inputs);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(tokensView);
+    iree_hal_buffer_view_release(maskView);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create input list: %s",
+                                   msg.c_str());
+  }
+  
+  iree_vm_ref_t tokensRef = iree_hal_buffer_view_move_ref(tokensView);
+  iree_vm_ref_t maskRef = iree_hal_buffer_view_move_ref(maskView);
+  iree_vm_list_push_ref_move(inputs, &tokensRef);
+  iree_vm_list_push_ref_move(inputs, &maskRef);
+  
+  // 4. Create output list
+  iree_vm_list_t *outputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 3,
+                               hostAllocator, &outputs);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(inputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create output list: %s",
+                                   msg.c_str());
+  }
+  
+  // 5. Invoke prefill
+  llvm::errs() << "IREEBackend::runPrefillContiguous: Invoking prefill...\n";
+  status = iree_vm_invoke(context, prefillFn, IREE_VM_INVOCATION_FLAG_NONE,
+                          nullptr, inputs, outputs, hostAllocator);
+  iree_vm_list_release(inputs);
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    llvm::errs() << "IREEBackend::runPrefillContiguous: Invoke failed: " << msg << "\n";
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to invoke prefill: %s", msg.c_str());
+  }
+  
+  // 6. Extract outputs: logits, cache_k, cache_v
+  iree_host_size_t outputSize = iree_vm_list_size(outputs);
+  llvm::errs() << "IREEBackend::runPrefillContiguous: Got " << outputSize << " outputs\n";
+  
+  if (outputSize < 3) {
+    iree_vm_list_release(outputs);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Prefill output has less than 3 elements");
+  }
+  
+  // Get logits view for argmax
+  iree_vm_ref_t logitsRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_assign(outputs, 0, &logitsRef);
+  iree_hal_buffer_view_t *logitsView = iree_hal_buffer_view_deref(logitsRef);
+  
+  // Get cache_k and cache_v views (retain for later use)
+  iree_vm_ref_t cacheKRef = iree_vm_ref_null();
+  iree_vm_ref_t cacheVRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_assign(outputs, 1, &cacheKRef);
+  cacheKView = iree_hal_buffer_view_deref(cacheKRef);
+  status = iree_vm_list_get_ref_assign(outputs, 2, &cacheVRef);
+  cacheVView = iree_hal_buffer_view_deref(cacheVRef);
+  
+  if (cacheKView) iree_hal_buffer_view_retain(cacheKView);
+  if (cacheVView) iree_hal_buffer_view_retain(cacheVView);
+  
+  // Print cache shape
+  iree_host_size_t cacheRank = iree_hal_buffer_view_shape_rank(cacheKView);
+  llvm::errs() << "IREEBackend::runPrefillContiguous: Cache K shape=[";
+  for (iree_host_size_t i = 0; i < cacheRank; ++i) {
+    if (i > 0) llvm::errs() << ", ";
+    llvm::errs() << iree_hal_buffer_view_shape_dim(cacheKView, i);
+  }
+  llvm::errs() << "]\n";
+  
+  // 7. Find argmax at position seqLen-1
+  iree_hal_buffer_t *logitsBuffer = iree_hal_buffer_view_buffer(logitsView);
+  int vocabSize = config.vocabSize;
+  
+  // Read the logits row at position seqLen-1
+  size_t rowOffset = (seqLen - 1) * vocabSize * sizeof(uint16_t);
+  std::vector<uint16_t> logitsRow(vocabSize);
+  status = iree_hal_device_transfer_d2h(
+      device, logitsBuffer, rowOffset,
+      logitsRow.data(), vocabSize * sizeof(uint16_t),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to read logits: %s", msg.c_str());
+  }
+  
+  // Find argmax
+  int64_t nextToken = 0;
+  uint16_t maxVal = 0;
+  for (int i = 0; i < vocabSize; ++i) {
+    uint16_t val = logitsRow[i];
+    uint16_t sign = val >> 15;
+    uint16_t magnitude = val & 0x7FFF;
+    uint16_t comparable = sign ? (0x8000 - magnitude) : (0x8000 + magnitude);
+    if (comparable > maxVal) {
+      maxVal = comparable;
+      nextToken = i;
+    }
+  }
+  
+  llvm::errs() << "IREEBackend::runPrefillContiguous: Next token = " << nextToken << "\n";
+  
+  iree_vm_list_release(outputs);
+  return nextToken;
+}
+
+// Contiguous decode: decode_step(token[1,1], position_id[1,1], attention_mask[1, max_cache_len+1], cache_k, cache_v)
+//   -> (logits[1,1,vocab], new_kv[heads, 2, layers, dim])
+llvm::Expected<int64_t>
+runDecodeContiguous(IREEBackend *backend, int64_t token, int seqLen,
+                    iree_vm_context_t *context, iree_vm_function_t &decodeFn,
+                    iree_hal_device_t *device, iree_allocator_t hostAllocator,
+                    const LLMModelConfig &config,
+                    iree_hal_buffer_view_t *&cacheKView, iree_hal_buffer_view_t *&cacheVView) {
+  static int decodeCount = 0;
+  static double totalAllocMs = 0, totalInvokeMs = 0, totalD2HMs = 0, totalTransposeMs = 0, totalH2DMs = 0, totalArgmaxMs = 0;
+  auto startTime = std::chrono::high_resolution_clock::now();
+  
+  if (decodeCount < 3) {
+    llvm::errs() << "IREEBackend::runDecodeContiguous[" << decodeCount << "]: "
+                 << "token=" << token << ", seqLen=" << seqLen << "\n";
+  }
+  decodeCount++;
+  
+  iree_status_t status = iree_ok_status();
+  iree_hal_allocator_t *allocator = iree_hal_device_allocator(device);
+  
+  if (!cacheKView || !cacheVView) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "Cache not initialized (call prefill first)");
+  }
+  
+  (void)config.maxCacheLen;  // Used for validation
+  int attentionMaskLen = config.attentionMaskLen;
+  int position = seqLen;  // Current position = number of tokens so far
+  
+  // Use pre-allocated buffers if available, otherwise allocate
+  static iree_hal_buffer_t *preAllocTokenBuffer = nullptr;
+  static iree_hal_buffer_view_t *preAllocTokenView = nullptr;
+  static iree_hal_buffer_t *preAllocPosBuffer = nullptr;
+  static iree_hal_buffer_view_t *preAllocPosView = nullptr;
+  static iree_hal_buffer_t *preAllocMaskBuffer = nullptr;
+  static iree_hal_buffer_view_t *preAllocMaskView = nullptr;
+  static int preAllocMaskLen = 0;
+  
+  // 1. Create/reuse token buffer: [1, 1]
+  const iree_hal_dim_t tokenDims[] = {1, 1};
+  if (!preAllocTokenBuffer) {
+    iree_hal_buffer_params_t bufParams = {
+        .usage = IREE_HAL_BUFFER_USAGE_DEFAULT | IREE_HAL_BUFFER_USAGE_MAPPING,
+        .access = IREE_HAL_MEMORY_ACCESS_ALL,
+        .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+    };
+    status = iree_hal_allocator_allocate_buffer(allocator, bufParams,
+                                                 sizeof(int64_t), &preAllocTokenBuffer);
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to allocate token buffer: %s", msg.c_str());
+    }
+    status = iree_hal_buffer_view_create(preAllocTokenBuffer, 2, tokenDims,
+                                          IREE_HAL_ELEMENT_TYPE_INT_64,
+                                          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+                                          hostAllocator, &preAllocTokenView);
+  }
+  
+  // Update token value via H2D
+  int64_t tokenVal = token;
+  status = iree_hal_device_transfer_h2d(device, &tokenVal, preAllocTokenBuffer,
+                                         0, sizeof(int64_t),
+                                         IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                         iree_infinite_timeout());
+  
+  // 2. Create/reuse position_id buffer: [1, 1]
+  if (!preAllocPosBuffer) {
+    iree_hal_buffer_params_t bufParams = {
+        .usage = IREE_HAL_BUFFER_USAGE_DEFAULT | IREE_HAL_BUFFER_USAGE_MAPPING,
+        .access = IREE_HAL_MEMORY_ACCESS_ALL,
+        .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+    };
+    status = iree_hal_allocator_allocate_buffer(allocator, bufParams,
+                                                 sizeof(int64_t), &preAllocPosBuffer);
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to allocate pos buffer: %s", msg.c_str());
+    }
+    status = iree_hal_buffer_view_create(preAllocPosBuffer, 2, tokenDims,
+                                          IREE_HAL_ELEMENT_TYPE_INT_64,
+                                          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+                                          hostAllocator, &preAllocPosView);
+  }
+  
+  // Update position value via H2D
+  int64_t posVal = static_cast<int64_t>(position);
+  status = iree_hal_device_transfer_h2d(device, &posVal, preAllocPosBuffer,
+                                         0, sizeof(int64_t),
+                                         IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                         iree_infinite_timeout());
+  
+  // 3. Create/reuse attention_mask buffer: [1, max_cache_len + 1]
+  const iree_hal_dim_t maskDims[] = {1, static_cast<iree_hal_dim_t>(attentionMaskLen)};
+  if (!preAllocMaskBuffer || preAllocMaskLen != attentionMaskLen) {
+    if (preAllocMaskView) iree_hal_buffer_view_release(preAllocMaskView);
+    if (preAllocMaskBuffer) iree_hal_buffer_release(preAllocMaskBuffer);
+    
+    iree_hal_buffer_params_t bufParams = {
+        .usage = IREE_HAL_BUFFER_USAGE_DEFAULT | IREE_HAL_BUFFER_USAGE_MAPPING,
+        .access = IREE_HAL_MEMORY_ACCESS_ALL,
+        .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                IREE_HAL_MEMORY_TYPE_HOST_VISIBLE,
+    };
+    status = iree_hal_allocator_allocate_buffer(allocator, bufParams,
+                                                 attentionMaskLen * sizeof(int64_t),
+                                                 &preAllocMaskBuffer);
+    if (!iree_status_is_ok(status)) {
+      auto msg = formatStatus(status);
+      iree_status_free(status);
+      return llvm::createStringError(std::errc::io_error,
+                                     "Failed to allocate mask buffer: %s", msg.c_str());
+    }
+    status = iree_hal_buffer_view_create(preAllocMaskBuffer, 2, maskDims,
+                                          IREE_HAL_ELEMENT_TYPE_INT_64,
+                                          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+                                          hostAllocator, &preAllocMaskView);
+    preAllocMaskLen = attentionMaskLen;
+  }
+  
+  // Update attention mask via H2D
+  std::vector<int64_t> attentionMask(attentionMaskLen, 0);
+  for (int i = 0; i <= position; ++i) {
+    attentionMask[i] = 1;
+  }
+  status = iree_hal_device_transfer_h2d(device, attentionMask.data(), preAllocMaskBuffer,
+                                         0, attentionMaskLen * sizeof(int64_t),
+                                         IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+                                         iree_infinite_timeout());
+  
+  // 4. Build input list: token, position_id, attention_mask, cache_k, cache_v
+  iree_vm_list_t *inputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 5,
+                               hostAllocator, &inputs);
+  if (!iree_status_is_ok(status)) {
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create input list: %s", msg.c_str());
+  }
+  
+  // Use retained views (don't move, just copy refs)
+  iree_hal_buffer_view_retain(preAllocTokenView);
+  iree_hal_buffer_view_retain(preAllocPosView);
+  iree_hal_buffer_view_retain(preAllocMaskView);
+  iree_vm_ref_t tokenRef = iree_hal_buffer_view_move_ref(preAllocTokenView);
+  iree_vm_ref_t posRef = iree_hal_buffer_view_move_ref(preAllocPosView);
+  iree_vm_ref_t maskRef = iree_hal_buffer_view_move_ref(preAllocMaskView);
+  
+  // Retain cache views for next iteration
+  iree_hal_buffer_view_retain(cacheKView);
+  iree_hal_buffer_view_retain(cacheVView);
+  iree_vm_ref_t cacheKRef = iree_hal_buffer_view_move_ref(cacheKView);
+  iree_vm_ref_t cacheVRef = iree_hal_buffer_view_move_ref(cacheVView);
+  
+  iree_vm_list_push_ref_move(inputs, &tokenRef);
+  iree_vm_list_push_ref_move(inputs, &posRef);
+  iree_vm_list_push_ref_move(inputs, &maskRef);
+  iree_vm_list_push_ref_move(inputs, &cacheKRef);
+  iree_vm_list_push_ref_move(inputs, &cacheVRef);
+  
+  // 5. Create output list
+  iree_vm_list_t *outputs = nullptr;
+  status = iree_vm_list_create(iree_vm_make_undefined_type_def(), 2,
+                               hostAllocator, &outputs);
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(inputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to create output list: %s", msg.c_str());
+  }
+  
+  auto allocEnd = std::chrono::high_resolution_clock::now();
+  
+  // 6. Invoke decode_step
+  status = iree_vm_invoke(context, decodeFn, IREE_VM_INVOCATION_FLAG_NONE,
+                          nullptr, inputs, outputs, hostAllocator);
+  iree_vm_list_release(inputs);
+  
+  auto invokeEnd = std::chrono::high_resolution_clock::now();
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    llvm::errs() << "IREEBackend::runDecodeContiguous: Invoke failed: " << msg << "\n";
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to invoke decode_step: %s", msg.c_str());
+  }
+  
+  // 7. Extract logits and new_kv
+  iree_vm_ref_t logitsRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_assign(outputs, 0, &logitsRef);
+  iree_hal_buffer_view_t *logitsView = iree_hal_buffer_view_deref(logitsRef);
+  
+  iree_vm_ref_t newKVRef = iree_vm_ref_null();
+  status = iree_vm_list_get_ref_assign(outputs, 1, &newKVRef);
+  iree_hal_buffer_view_t *newKVView = iree_hal_buffer_view_deref(newKVRef);
+  
+  // 8. Update cache with new_kv at position
+  // new_kv shape: [heads, 2, layers, dim] -> need [layers, heads, dim] for each of K and V
+  // Cache shape: [max_cache_len, layers, heads, dim]
+  // Single contiguous update at position!
+  
+  int numLayers = config.numLayers;
+  int numHeads = config.numKVHeads;
+  int headDim = config.headDim;
+  size_t newKVBytes = numHeads * 2 * numLayers * headDim * sizeof(uint16_t);
+  
+  // Read new_kv to host
+  std::vector<uint16_t> newKVHost(numHeads * 2 * numLayers * headDim);
+  iree_hal_buffer_t *newKVBuffer = iree_hal_buffer_view_buffer(newKVView);
+  status = iree_hal_device_transfer_d2h(
+      device, newKVBuffer, 0,
+      newKVHost.data(), newKVBytes,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to read new_kv: %s", msg.c_str());
+  }
+  
+  auto d2hEnd = std::chrono::high_resolution_clock::now();
+  
+  // Transpose and update cache
+  // new_kv is [heads, 2, layers, dim], we need [layers, heads, dim] for K and V
+  size_t sliceSize = numLayers * numHeads * headDim;  // Elements per position
+  std::vector<uint16_t> newK(sliceSize);
+  std::vector<uint16_t> newV(sliceSize);
+  
+  // Transpose: [h, kv, l, d] -> [l, h, d]
+  for (int h = 0; h < numHeads; ++h) {
+    for (int l = 0; l < numLayers; ++l) {
+      for (int d = 0; d < headDim; ++d) {
+        // Source: [h, 0, l, d] = h * 2 * numLayers * headDim + 0 * numLayers * headDim + l * headDim + d
+        size_t srcIdxK = h * 2 * numLayers * headDim + 0 * numLayers * headDim + l * headDim + d;
+        size_t srcIdxV = h * 2 * numLayers * headDim + 1 * numLayers * headDim + l * headDim + d;
+        // Dest: [l, h, d] = l * numHeads * headDim + h * headDim + d
+        size_t dstIdx = l * numHeads * headDim + h * headDim + d;
+        newK[dstIdx] = newKVHost[srcIdxK];
+        newV[dstIdx] = newKVHost[srcIdxV];
+      }
+    }
+  }
+  
+  auto transposeEnd = std::chrono::high_resolution_clock::now();
+  
+  // Write to cache at position - CONTIGUOUS write!
+  size_t posOffset = position * sliceSize * sizeof(uint16_t);
+  iree_hal_buffer_t *cacheKBuffer = iree_hal_buffer_view_buffer(cacheKView);
+  iree_hal_buffer_t *cacheVBuffer = iree_hal_buffer_view_buffer(cacheVView);
+  
+  status = iree_hal_device_transfer_h2d(
+      device, newK.data(), cacheKBuffer, posOffset,
+      sliceSize * sizeof(uint16_t),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to update cache_k: %s", msg.c_str());
+  }
+  
+  status = iree_hal_device_transfer_h2d(
+      device, newV.data(), cacheVBuffer, posOffset,
+      sliceSize * sizeof(uint16_t),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to update cache_v: %s", msg.c_str());
+  }
+  
+  auto h2dEnd = std::chrono::high_resolution_clock::now();
+  
+  // 9. Find argmax from logits
+  int vocabSize = config.vocabSize;
+  std::vector<uint16_t> logitsHost(vocabSize);
+  iree_hal_buffer_t *logitsBuffer = iree_hal_buffer_view_buffer(logitsView);
+  status = iree_hal_device_transfer_d2h(
+      device, logitsBuffer, 0,
+      logitsHost.data(), vocabSize * sizeof(uint16_t),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+  
+  if (!iree_status_is_ok(status)) {
+    iree_vm_list_release(outputs);
+    auto msg = formatStatus(status);
+    iree_status_free(status);
+    return llvm::createStringError(std::errc::io_error,
+                                   "Failed to read logits: %s", msg.c_str());
+  }
+  
+  // Find argmax
+  int64_t nextToken = 0;
+  uint16_t maxVal = 0;
+  for (int i = 0; i < vocabSize; ++i) {
+    uint16_t val = logitsHost[i];
+    uint16_t sign = val >> 15;
+    uint16_t magnitude = val & 0x7FFF;
+    uint16_t comparable = sign ? (0x8000 - magnitude) : (0x8000 + magnitude);
+    if (comparable > maxVal) {
+      maxVal = comparable;
+      nextToken = i;
+    }
+  }
+  
+  auto argmaxEnd = std::chrono::high_resolution_clock::now();
+  
+  // Accumulate timings
+  totalAllocMs += std::chrono::duration<double, std::milli>(allocEnd - startTime).count();
+  totalInvokeMs += std::chrono::duration<double, std::milli>(invokeEnd - allocEnd).count();
+  totalD2HMs += std::chrono::duration<double, std::milli>(d2hEnd - invokeEnd).count();
+  totalTransposeMs += std::chrono::duration<double, std::milli>(transposeEnd - d2hEnd).count();
+  totalH2DMs += std::chrono::duration<double, std::milli>(h2dEnd - transposeEnd).count();
+  totalArgmaxMs += std::chrono::duration<double, std::milli>(argmaxEnd - h2dEnd).count();
+  
+  if (decodeCount <= 3) {
+    llvm::errs() << "IREEBackend::runDecodeContiguous: Next token = " << nextToken << "\n";
+  }
+  
+  // Print timing summary every 100 decodes
+  if (decodeCount % 100 == 0 || decodeCount == 10) {
+    llvm::errs() << "IREEBackend::runDecodeContiguous timing (avg over " << decodeCount << " calls):\n";
+    llvm::errs() << "  alloc:     " << llvm::format("%.2f", totalAllocMs / decodeCount) << " ms\n";
+    llvm::errs() << "  invoke:    " << llvm::format("%.2f", totalInvokeMs / decodeCount) << " ms\n";
+    llvm::errs() << "  D2H:       " << llvm::format("%.2f", totalD2HMs / decodeCount) << " ms\n";
+    llvm::errs() << "  transpose: " << llvm::format("%.2f", totalTransposeMs / decodeCount) << " ms\n";
+    llvm::errs() << "  H2D:       " << llvm::format("%.2f", totalH2DMs / decodeCount) << " ms\n";
+    llvm::errs() << "  argmax:    " << llvm::format("%.2f", totalArgmaxMs / decodeCount) << " ms\n";
+    llvm::errs() << "  TOTAL:     " << llvm::format("%.2f", (totalAllocMs + totalInvokeMs + totalD2HMs + totalTransposeMs + totalH2DMs + totalArgmaxMs) / decodeCount) << " ms\n";
+  }
   
   iree_vm_list_release(outputs);
   return nextToken;
