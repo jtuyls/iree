@@ -22,7 +22,6 @@ TEST_F(IREEBackendTest, ConfigDefaults) {
   IREEBackendConfig config;
   EXPECT_EQ(config.deviceUri, "local-task");
   EXPECT_EQ(config.maxNewTokens, 512);
-  EXPECT_EQ(config.maxSeqLen, 8192);
 }
 
 TEST_F(IREEBackendTest, CreateWithMissingVMFBFails) {
@@ -40,12 +39,12 @@ TEST_F(IREEBackendTest, CreateWithMissingVMFBFails) {
 TEST_F(IREEBackendTest, ModelConfigDefaults) {
   LLMModelConfig config;
   EXPECT_EQ(config.numLayers, 32);
-  EXPECT_EQ(config.numHeads, 32);
   EXPECT_EQ(config.numKVHeads, 8);
   EXPECT_EQ(config.headDim, 128);
-  EXPECT_EQ(config.vocabSize, 32000);
-  EXPECT_EQ(config.blockSeqStride, 16);
-  EXPECT_EQ(config.modelType, "llama");
+  EXPECT_EQ(config.vocabSize, 128256);
+  EXPECT_EQ(config.prefillLen, 512);
+  EXPECT_EQ(config.maxCacheLen, 512);
+  EXPECT_EQ(config.attentionMaskLen, 513);
 }
 
 TEST_F(IREEBackendTest, ModelConfigLoadNonexistent) {
@@ -77,9 +76,9 @@ TEST_F(IREEBackendIntegrationTest, CreateWithValidConfig) {
   }
 
   IREEBackendConfig config;
-  config.vmfbPath = testModelDir_ + "/model_gfx950.vmfb";
+  config.vmfbPath = testModelDir_ + "/model.vmfb";
   config.irpaPath = testModelDir_ + "/model.irpa";
-  config.tokenizerPath = testModelDir_ + "/tokenizer.model";
+  config.tokenizerPath = testModelDir_ + "/tokenizer.json";
   config.configPath = testModelDir_ + "/config.json";
   config.deviceUri = "hip";
 
@@ -101,4 +100,3 @@ TEST_F(IREEBackendIntegrationTest, CreateWithValidConfig) {
 
 } // namespace
 } // namespace mlir::iree_compiler::LLMAssist
-

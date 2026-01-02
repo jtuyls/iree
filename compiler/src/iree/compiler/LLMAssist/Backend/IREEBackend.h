@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace mlir::iree_compiler::LLMAssist {
 
@@ -29,56 +30,31 @@ struct IREEBackendConfig {
   /// Path to the model parameters (.irpa file).
   std::string irpaPath;
 
-  /// Path to the tokenizer model (e.g., .model file for SentencePiece).
+  /// Path to the tokenizer model.
   std::string tokenizerPath;
 
-  /// Path to the model configuration JSON.
+  /// Path to the model configuration JSON (optional, auto-detected if empty).
   std::string configPath;
 
-  /// IREE device URI (e.g., "local-task", "rocm://0", "cuda://0").
+  /// IREE device URI (e.g., "local-task", "hip", "cuda://0").
   std::string deviceUri = "local-task";
 
   /// Maximum number of tokens to generate.
   int maxNewTokens = 512;
-
-  /// Maximum sequence length (prompt + generated).
-  int maxSeqLen = 8192;
 };
 
 /// LLM model configuration loaded from JSON.
 struct LLMModelConfig {
+  // Model architecture
   int numLayers = 32;
-  int numHeads = 32;
   int numKVHeads = 8;
   int headDim = 128;
-  int vocabSize = 32000;
-  int blockSeqStride = 16;
-  int deviceBlockCount = 64;
-  int64_t pageSize = 0; // 0 means auto-calculate
-  int contextLength = 4096;
-  std::string modelType = "llama";
+  int vocabSize = 128256;
   
-  // Incremental model specific fields
-  int prefillLen = 512;       // Fixed prefill length
-  int maxCacheLen = 512;      // Maximum cache length
-  int attentionMaskLen = 513; // prefillLen + 1
-  
-  // Contiguous cache layout fields
-  std::string cacheLayout = "model";    // "model" or "contiguous"
-  std::vector<int> cacheShape;          // [seq, layers, heads, dim] for contiguous
-  std::vector<int> newKVShape;          // [1, 2, layers, heads, dim] for contiguous output
-  
-  /// Check if this is an incremental model (not paged attention)
-  bool isIncremental() const {
-    return modelType == "llama_incremental" || 
-           modelType == "tinyllama_incremental" ||
-           modelType == "llama_contiguous";
-  }
-  
-  /// Check if this model uses contiguous cache layout
-  bool isContiguous() const {
-    return cacheLayout == "contiguous" || modelType == "llama_contiguous";
-  }
+  // Cache configuration
+  int prefillLen = 512;         // Fixed prefill sequence length
+  int maxCacheLen = 512;        // Maximum KV cache length
+  int attentionMaskLen = 513;   // prefillLen + 1 for decode
 
   /// Load configuration from a JSON file.
   static llvm::Expected<LLMModelConfig> loadFromFile(llvm::StringRef path);
@@ -86,8 +62,8 @@ struct LLMModelConfig {
 
 /// IREE-native LLM backend for in-process inference.
 ///
-/// This backend loads a pre-compiled LLM VMFB module and runs inference
-/// directly within the compiler process, without requiring external services.
+/// This backend loads a pre-compiled LLM VMFB module with contiguous KV cache
+/// layout and runs inference directly within the compiler process.
 class IREEBackend : public LLMBackend {
 public:
   /// Create an IREE backend with the given configuration.
@@ -105,8 +81,7 @@ public:
 
   /// Generate text completion.
   llvm::Expected<GenerationResult>
-  generate(llvm::StringRef prompt,
-           const GenerationConfig &config) override;
+  generate(llvm::StringRef prompt, const GenerationConfig &config) override;
 
   /// Get the backend name.
   llvm::StringRef getName() const override { return "IREE"; }
@@ -118,24 +93,20 @@ private:
   IREEBackend(const IREEBackendConfig &config);
 
   llvm::Error initialize();
+  void cleanup();
 
   /// Internal token generation loop.
   llvm::Expected<std::vector<int64_t>>
   generateTokens(llvm::ArrayRef<int64_t> promptTokens, int maxNewTokens);
 
-  /// Run the prefill phase (process prompt).
-  /// Returns the first predicted token.
+  /// Run the prefill phase (process prompt, initialize cache).
   llvm::Expected<int64_t> runPrefill(llvm::ArrayRef<int64_t> tokens, int seqLen);
 
   /// Run a single decode step.
-  /// Returns the next predicted token.
-  llvm::Expected<int64_t> runDecode(int64_t token, int seqLen, int startPos);
+  llvm::Expected<int64_t> runDecode(int64_t token, int position);
 
-  /// Initialize the KV-cache buffer.
-  llvm::Error initializeCache();
-
-  /// Clean up IREE resources.
-  void cleanup();
+  /// Find argmax of fp16 logits buffer.
+  int64_t argmaxFp16(const uint16_t *logits, int size);
 
   IREEBackendConfig config_;
   LLMModelConfig modelConfig_;
@@ -159,51 +130,23 @@ private:
   iree_vm_function_t prefillFn_;
   iree_vm_function_t decodeFn_;
 
-  // ============ Paged attention cache (for paged models) ============
-  // Flat KV-cache buffer (matches Python test approach)
-  // Shape: [deviceBlockCount, pageSize] where pageSize = layers*2*heads*stride*dim
-  iree_hal_buffer_t *cacheBuffer_ = nullptr;
-  iree_hal_buffer_view_t *cacheBufferView_ = nullptr;
-  int64_t deviceBlockCount_ = 64;
-  int64_t pageSize_ = 0;  // Computed from model config
-  int blockSeqStride_ = 32;
-
-  // Pre-allocated decode input buffers and views (for paged attention)
-  iree_hal_buffer_t *decodeTokenBuffer_ = nullptr;
-  iree_hal_buffer_view_t *decodeTokenView_ = nullptr;
-  iree_hal_buffer_t *decodeSeqLenBuffer_ = nullptr;
-  iree_hal_buffer_view_t *decodeSeqLenView_ = nullptr;
-  iree_hal_buffer_t *decodeStartPosBuffer_ = nullptr;
-  iree_hal_buffer_view_t *decodeStartPosView_ = nullptr;
-  iree_hal_buffer_t *decodePageTableBuffer_ = nullptr;
-  int decodePageTableCapacity_ = 0;  // Current capacity in pages
-  int currentNumPages_ = 0;  // Current page table size
-  
-  // ============ Incremental model cache (for non-paged models) ============
-  // Cache K and V: [layers, 1, heads, max_cache_len, head_dim]
-  iree_hal_buffer_t *cacheKBuffer_ = nullptr;
+  // KV Cache buffers (contiguous layout: [max_cache_len, layers, heads, dim])
   iree_hal_buffer_view_t *cacheKView_ = nullptr;
-  iree_hal_buffer_t *cacheVBuffer_ = nullptr;
   iree_hal_buffer_view_t *cacheVView_ = nullptr;
-  
-  // Attention mask buffer: [1, max_cache_len + 1]
-  iree_hal_buffer_t *attentionMaskBuffer_ = nullptr;
-  iree_hal_buffer_view_t *attentionMaskView_ = nullptr;
-  
-  // Current sequence position for incremental decode
-  int currentSeqPos_ = 0;
-  
-  // Pre-allocated contiguous decode buffers (to avoid allocation overhead)
-  iree_hal_buffer_t *contiguousTokenBuffer_ = nullptr;
-  iree_hal_buffer_view_t *contiguousTokenView_ = nullptr;
-  iree_hal_buffer_t *contiguousPosBuffer_ = nullptr;
-  iree_hal_buffer_view_t *contiguousPosView_ = nullptr;
-  iree_hal_buffer_t *contiguousMaskBuffer_ = nullptr;
-  iree_hal_buffer_view_t *contiguousMaskView_ = nullptr;
-  bool contiguousBuffersInitialized_ = false;
+
+  // Pre-allocated decode input buffers (avoid allocation per step)
+  iree_hal_buffer_t *tokenBuffer_ = nullptr;
+  iree_hal_buffer_view_t *tokenView_ = nullptr;
+  iree_hal_buffer_t *positionBuffer_ = nullptr;
+  iree_hal_buffer_view_t *positionView_ = nullptr;
+  iree_hal_buffer_t *maskBuffer_ = nullptr;
+  iree_hal_buffer_view_t *maskView_ = nullptr;
 
   // Host allocator
   iree_allocator_t hostAllocator_;
+
+  // Current sequence position
+  int currentPosition_ = 0;
 };
 
 /// Factory function to create an IREE backend.
@@ -212,4 +155,3 @@ std::unique_ptr<LLMBackend> createIREEBackend(const IREEBackendConfig &config);
 } // namespace mlir::iree_compiler::LLMAssist
 
 #endif // IREE_COMPILER_LLMASSIST_BACKEND_IREEBACKEND_H_
-
