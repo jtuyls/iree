@@ -82,6 +82,8 @@ def main():
     parser.add_argument("--cache-len", type=int, default=512,
                         help="Cache length (power of 2 recommended)")
     parser.add_argument("--dtype", default="float16")
+    parser.add_argument("--use-sdpa", action="store_true",
+                        help="Use scaled_dot_product_attention (requires torch-mlir support)")
     args = parser.parse_args()
     
     from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
@@ -95,7 +97,7 @@ def main():
         args.model, 
         torch_dtype=dtype, 
         trust_remote_code=True,
-        attn_implementation="sdpa",  # Use SDPA for fused attention
+        attn_implementation="eager",  # Use eager for broader compatibility
     )
     model.eval()
     
@@ -124,11 +126,12 @@ def main():
     class InPlaceCacheLLM(nn.Module):
         """LLM with in-place cache update for power-of-2 attention dimensions."""
         
-        def __init__(self, hf_model, config, cache_len, dtype):
+        def __init__(self, hf_model, config, cache_len, dtype, use_sdpa=False):
             super().__init__()
             self.hf_model = hf_model
             self.cache_len = cache_len
             self.dtype = dtype
+            self.use_sdpa = use_sdpa
             
             self.num_layers = config.num_hidden_layers
             self.num_heads = config.num_attention_heads
@@ -299,12 +302,20 @@ def main():
                 v_expanded = repeat_kv(v_full, self.num_kv_groups)
                 
                 # Attention: [1, heads, 1, cache_len] - power of 2!
-                # Use SDPA for fused attention kernel
-                attn_output = F.scaled_dot_product_attention(
-                    q, k_expanded, v_expanded,
-                    attn_mask=attn_mask,
-                    scale=1.0 / math.sqrt(self.head_dim),
-                )
+                scale = 1.0 / math.sqrt(self.head_dim)
+                if self.use_sdpa:
+                    # Use SDPA for fused attention kernel (requires torch-mlir support)
+                    attn_output = F.scaled_dot_product_attention(
+                        q, k_expanded, v_expanded,
+                        attn_mask=attn_mask,
+                        scale=scale,
+                    )
+                else:
+                    # Manual attention for broader compatibility
+                    attn_weights = torch.matmul(q, k_expanded.transpose(-2, -1)) * scale
+                    attn_weights = attn_weights + attn_mask
+                    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+                    attn_output = torch.matmul(attn_weights, v_expanded)
                 
                 # Output projection - squeeze to 2D for better codegen
                 attn_output = attn_output.squeeze(2)  # [1, 32, 128]
@@ -330,7 +341,7 @@ def main():
             
             return logits, cache
     
-    llm = InPlaceCacheLLM(model, config, cache_len, dtype)
+    llm = InPlaceCacheLLM(model, config, cache_len, dtype, use_sdpa=args.use_sdpa)
     
     # =========== Test ===========
     print("\n=== Testing Module ===")
