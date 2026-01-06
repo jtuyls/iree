@@ -6,10 +6,12 @@
 
 #include "iree/compiler/Dialect/Encoding/IR/EncodingDialect.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
+#include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -164,6 +166,28 @@ static func::FuncOp createWorkgroupFunc(IREE::Stream::TensorEncodeOp encodeOp,
     if (destinationType.getEncoding()) {
       value = IREE::Encoding::SetEncodingOp::create(
           builder, loc, destinationType, value, encodingDimsValues);
+
+      // Insert specialization markers for specializable layouts.
+      // SpecializableLayoutAttr is created by SpecializeEncodings when there
+      // are multiple variants based on runtime dimensions.
+      if (auto specializableLayout =
+              dyn_cast<IREE::Encoding::SpecializableLayoutAttr>(
+                  destinationType.getEncoding())) {
+        // If there are variant layouts, we have specialization.
+        if (!specializableLayout.getVariantLayouts().empty()) {
+          // Get the specialization ranges to find which dimension to specialize on.
+          // The first dimension with an assumption is the one we specialize on.
+          ArrayAttr specRanges = specializableLayout.getSpecializationRanges();
+          if (!specRanges.empty()) {
+            // For now, specialize on the first encoding dim (index 0).
+            // TODO: Generalize to handle multiple specialization dimensions.
+            if (!encodingDimsValues.empty()) {
+              IREE::Util::SpecializeOp::create(builder, loc,
+                                               encodingDimsValues[0]);
+            }
+          }
+        }
+      }
     }
   }
 

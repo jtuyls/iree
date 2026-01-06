@@ -68,6 +68,63 @@ getSpecializerAttrs(Operation *op) {
   return attrs;
 }
 
+/// Inserts specialization markers for a single operation.
+static void insertMarkersForOp(Operation *op, OpBuilder &builder,
+                               DenseMap<std::pair<Value, unsigned>, Value>
+                                   &encodingDimCache) {
+  // Get all specializer attributes from this operation
+  auto specializerAttrs = getSpecializerAttrs(op);
+  if (specializerAttrs.empty()) {
+    return;
+  }
+
+  // For each specializer attribute, get the operands to specialize on
+  for (auto specializerAttr : specializerAttrs) {
+    auto specOperands = specializerAttr.getSpecializationOperands(op);
+    if (specOperands.empty()) {
+      continue;
+    }
+
+    LLVM_DEBUG(llvm::dbgs()
+               << "Inserting specialization markers for op: " << *op << "\n");
+
+    // Set insertion point after the operation
+    builder.setInsertionPointAfter(op);
+
+    for (const auto &specOp : specOperands) {
+      auto key = std::make_pair(specOp.operand, specOp.dimIndex);
+
+      // Check if we've already created an encoding_dim for this
+      // (operand, dimIndex) pair
+      Value encodingDimValue;
+      auto it = encodingDimCache.find(key);
+      if (it != encodingDimCache.end()) {
+        encodingDimValue = it->second;
+        LLVM_DEBUG(llvm::dbgs() << "  Reusing encoding_dim for operand dim "
+                                << specOp.dimIndex << "\n");
+      } else {
+        // Create the encoding_dim op
+        auto encodingDimOp = IREE::Encoding::EncodingDimOp::create(
+            builder, op->getLoc(), specOp.operand,
+            static_cast<int64_t>(specOp.dimIndex));
+        encodingDimValue = encodingDimOp.getResult();
+        encodingDimCache[key] = encodingDimValue;
+
+        LLVM_DEBUG(llvm::dbgs()
+                   << "  Created encoding_dim for operand dim "
+                   << specOp.dimIndex << ": " << encodingDimValue << "\n");
+      }
+
+      // Create the specialize op
+      IREE::Util::SpecializeOp::create(builder, op->getLoc(), encodingDimValue);
+
+      LLVM_DEBUG(llvm::dbgs()
+                 << "  Created util.specialize for dim " << specOp.dimIndex
+                 << "\n");
+    }
+  }
+}
+
 /// Walks a dispatch region looking for operations with specializable encodings
 /// and inserts markers for them using the getSpecializationOperands API.
 static void processDispatchRegion(IREE::Flow::DispatchRegionOp regionOp) {
@@ -84,59 +141,7 @@ static void processDispatchRegion(IREE::Flow::DispatchRegionOp regionOp) {
       return;
     }
 
-    // Get all specializer attributes from this operation
-    auto specializerAttrs = getSpecializerAttrs(op);
-    if (specializerAttrs.empty()) {
-      return;
-    }
-
-    // For each specializer attribute, get the operands to specialize on
-    for (auto specializerAttr : specializerAttrs) {
-      auto specOperands = specializerAttr.getSpecializationOperands(op);
-      if (specOperands.empty()) {
-        continue;
-      }
-
-      LLVM_DEBUG(llvm::dbgs()
-                 << "Inserting specialization markers for op: " << *op << "\n");
-
-      // Set insertion point after the operation
-      builder.setInsertionPointAfter(op);
-
-      for (const auto &specOp : specOperands) {
-        auto key = std::make_pair(specOp.operand, specOp.dimIndex);
-
-        // Check if we've already created an encoding_dim for this
-        // (operand, dimIndex) pair
-        Value encodingDimValue;
-        auto it = encodingDimCache.find(key);
-        if (it != encodingDimCache.end()) {
-          encodingDimValue = it->second;
-          LLVM_DEBUG(llvm::dbgs()
-                     << "  Reusing encoding_dim for operand dim "
-                     << specOp.dimIndex << "\n");
-        } else {
-          // Create the encoding_dim op
-          auto encodingDimOp = IREE::Encoding::EncodingDimOp::create(
-              builder, op->getLoc(), specOp.operand,
-              static_cast<int64_t>(specOp.dimIndex));
-          encodingDimValue = encodingDimOp.getResult();
-          encodingDimCache[key] = encodingDimValue;
-
-          LLVM_DEBUG(llvm::dbgs()
-                     << "  Created encoding_dim for operand dim "
-                     << specOp.dimIndex << ": " << encodingDimValue << "\n");
-        }
-
-        // Create the specialize op
-        IREE::Util::SpecializeOp::create(builder, op->getLoc(),
-                                         encodingDimValue);
-
-        LLVM_DEBUG(llvm::dbgs()
-                   << "  Created util.specialize for dim " << specOp.dimIndex
-                   << "\n");
-      }
-    }
+    insertMarkersForOp(op, builder, encodingDimCache);
   });
 }
 
