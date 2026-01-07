@@ -151,7 +151,7 @@ def main():
         def _get_layer_components(self, layer_idx):
             """Get components from HF model layer."""
             layer = self.hf_model.model.layers[layer_idx]
-            return {
+            components = {
                 'input_layernorm': layer.input_layernorm,
                 'q_proj': layer.self_attn.q_proj,
                 'k_proj': layer.self_attn.k_proj,
@@ -160,6 +160,12 @@ def main():
                 'post_attention_layernorm': layer.post_attention_layernorm,
                 'mlp': layer.mlp,
             }
+            # QKNorm (used by Qwen3 and some other models)
+            if hasattr(layer.self_attn, 'q_norm'):
+                components['q_norm'] = layer.self_attn.q_norm
+            if hasattr(layer.self_attn, 'k_norm'):
+                components['k_norm'] = layer.self_attn.k_norm
+            return components
         
         def prefill(self, input_ids, attention_mask):
             """
@@ -273,6 +279,12 @@ def main():
                 q = q.view(batch_size, self.num_heads, self.head_dim).unsqueeze(2)  # [1, 32, 1, 128]
                 k = k.view(batch_size, self.num_kv_heads, self.head_dim).unsqueeze(2)  # [1, 8, 1, 128]
                 v = v.view(batch_size, self.num_kv_heads, self.head_dim).unsqueeze(2)  # [1, 8, 1, 128]
+                
+                # Apply QKNorm if present (Qwen3 and similar models)
+                if 'q_norm' in components:
+                    q = components['q_norm'](q)
+                if 'k_norm' in components:
+                    k = components['k_norm'](k)
                 
                 # Apply RoPE
                 q, k = apply_rotary_pos_emb(q, k, cos, sin)
