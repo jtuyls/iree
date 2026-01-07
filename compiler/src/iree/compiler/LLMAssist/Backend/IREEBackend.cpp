@@ -306,7 +306,8 @@ llvm::Error IREEBackend::initialize() {
       reinterpret_cast<const uint8_t *>(vmfbBuffer_->getBufferStart()),
       vmfbBuffer_->getBufferSize()};
   status = iree_vm_bytecode_module_create(
-      instance_, vmfbSpan, iree_allocator_null(), hostAllocator_, &llmModule_);
+      instance_, IREE_VM_BYTECODE_MODULE_FLAG_NONE, vmfbSpan,
+      iree_allocator_null(), hostAllocator_, &llmModule_);
   if (!iree_status_is_ok(status)) {
     auto msg = formatStatus(status);
     iree_status_free(status);
