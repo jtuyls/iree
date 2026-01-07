@@ -420,7 +420,7 @@ struct FallbackEncodingDimReification {
     }
 
     // For dynamic dimensions, create a tensor.dim op
-    return builder.create<tensor::DimOp>(loc, tensor, shapeDim).getResult();
+    return tensor::DimOp::create(builder, loc, tensor, shapeDim).getResult();
   }
 };
 

@@ -128,11 +128,27 @@ static func::FuncOp createWorkgroupFunc(IREE::Stream::TensorEncodeOp encodeOp,
             builder, loc, block.getArgument(argIndex++),
             builder.getIndexAttr(ordinalCount++)));
   }
+  // Check which encoding dims came from util.specialize ops so we can
+  // recreate them inside the dispatch function.
+  SmallVector<bool> isSpecialized;
+  for (Value encodingDim : encodeOp.getEncodingDims()) {
+    isSpecialized.push_back(
+        encodingDim.getDefiningOp<IREE::Util::SpecializeOp>() != nullptr);
+  }
+
   for (size_t i = 0; i < encodeOp.getEncodingDims().size(); ++i) {
-    encodingDimsValues.push_back(
-        IREE::TensorExt::DispatchWorkloadOrdinalOp::create(
-            builder, loc, block.getArgument(argIndex++),
-            builder.getIndexAttr(ordinalCount++)));
+    Value ordinalValue = IREE::TensorExt::DispatchWorkloadOrdinalOp::create(
+        builder, loc, block.getArgument(argIndex++),
+        builder.getIndexAttr(ordinalCount++));
+
+    // If this encoding dim came from a util.specialize op, recreate it inside
+    // the dispatch to preserve the specialization marker.
+    if (isSpecialized[i]) {
+      ordinalValue = IREE::Util::SpecializeOp::create(builder, loc, ordinalValue)
+                         .getResult();
+    }
+
+    encodingDimsValues.push_back(ordinalValue);
   }
 
   auto zero = arith::ConstantIndexOp::create(builder, loc, 0);
@@ -164,30 +180,13 @@ static func::FuncOp createWorkgroupFunc(IREE::Stream::TensorEncodeOp encodeOp,
           encodingDimsValues);
     }
     if (destinationType.getEncoding()) {
-      value = IREE::Encoding::SetEncodingOp::create(
-          builder, loc, destinationType, value, encodingDimsValues);
-
-      // Insert specialization markers for specializable layouts.
-      // SpecializableLayoutAttr is created by SpecializeEncodings when there
-      // are multiple variants based on runtime dimensions.
-      if (auto specializableLayout =
-              dyn_cast<IREE::Encoding::SpecializableLayoutAttr>(
-                  destinationType.getEncoding())) {
-        // If there are variant layouts, we have specialization.
-        if (!specializableLayout.getVariantLayouts().empty()) {
-          // Get the specialization ranges to find which dimension to specialize on.
-          // The first dimension with an assumption is the one we specialize on.
-          ArrayAttr specRanges = specializableLayout.getSpecializationRanges();
-          if (!specRanges.empty()) {
-            // For now, specialize on the first encoding dim (index 0).
-            // TODO: Generalize to handle multiple specialization dimensions.
-            if (!encodingDimsValues.empty()) {
-              IREE::Util::SpecializeOp::create(builder, loc,
-                                               encodingDimsValues[0]);
-            }
-          }
-        }
-      }
+      // The encodingDimsValues already include util.specialize ops for
+      // dimensions that were specialized in the original IR (hoisted from
+      // outside the dispatch by checking if the encoding dim came from a
+      // util.specialize op).
+      value = IREE::Encoding::SetEncodingOp::create(builder, loc,
+                                                     destinationType, value,
+                                                     encodingDimsValues);
     }
   }
 
@@ -366,6 +365,25 @@ void MaterializeEncodingsPass::runOnOperation() {
     }
     auto [executableOp, exportOp] = cachedExecutables[encodingSignature];
     replaceEncodeOpWithDispatchOp(rewriter, encodeOp, executableOp, exportOp);
+  }
+
+  // Clean up util.specialize ops at the module level. After we've created
+  // dispatch functions with specialize ops inside, the outer specialize ops
+  // are no longer needed. Replace their results with their inputs.
+  SmallVector<IREE::Util::SpecializeOp> specializeOps;
+  for (auto funcOp : moduleOp.getOps<mlir::FunctionOpInterface>()) {
+    // Only clean up specialize ops in the main functions, not in dispatch
+    // functions (which are inside stream.executable).
+    if (funcOp->getParentOfType<IREE::Stream::ExecutableOp>()) {
+      continue;
+    }
+    funcOp.walk([&](IREE::Util::SpecializeOp op) {
+      specializeOps.push_back(op);
+    });
+  }
+  for (auto specOp : specializeOps) {
+    specOp.getResult().replaceAllUsesWith(specOp.getOperand());
+    specOp.erase();
   }
 }
 
