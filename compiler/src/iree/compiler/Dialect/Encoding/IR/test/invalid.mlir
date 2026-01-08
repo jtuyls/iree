@@ -219,9 +219,9 @@ func.func @negative_layout_packed_storage_superbyte(%arg0: tensor<?x4xf32, #iree
 
 // -----
 
-func.func @encoding_dim_no_encoding(%arg0: tensor<?x?xf32>) -> index {
+func.func @dim_no_encoding(%arg0: tensor<?x?xf32>) -> index {
   // expected-error @+1 {{source tensor must have an encoding}}
-  %dim = iree_encoding.encoding_dim %arg0[0] : tensor<?x?xf32>
+  %dim = iree_encoding.dim %arg0[0] : tensor<?x?xf32>
   return %dim : index
 }
 
@@ -231,8 +231,8 @@ func.func @encoding_dim_no_encoding(%arg0: tensor<?x?xf32>) -> index {
 #map1 = affine_map<(d0, d1, d2) -> (d2, d1)>
 #map2 = affine_map<(d0, d1, d2) -> (d0, d1)>
 #encoding = #iree_encoding.encoding<operand_index = 0 : i64, op_type = matmul, element_types = [f32, f32, f32], user_indexing_maps = [#map, #map1, #map2], iteration_sizes = [?, ?, ?]>
-func.func @encoding_dim_out_of_bounds(%arg0: tensor<?x?xf32, #encoding>) -> index {
+func.func @dim_out_of_bounds(%arg0: tensor<?x?xf32, #encoding>) -> index {
   // expected-error @+1 {{encoding dimension index 5 is out of bounds for encoding with 3 dimensions}}
-  %dim = iree_encoding.encoding_dim %arg0[5] : tensor<?x?xf32, #encoding>
+  %dim = iree_encoding.dim %arg0[5] : tensor<?x?xf32, #encoding>
   return %dim : index
 }

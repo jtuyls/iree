@@ -20,22 +20,22 @@ namespace mlir::iree_compiler::IREE::Encoding {
 // Interface-based reification pattern
 //===----------------------------------------------------------------------===//
 
-/// Resolves iree_encoding.encoding_dim using EncodingDimReificationInterface.
+/// Resolves iree_encoding.dim using EncodingDimReificationInterface.
 ///
 /// This pattern handles operations that implement the interface in two ways:
 /// 1. Operations that directly provide encoding dims (like set_encoding):
 ///    The pattern calls reifyEncodingDim() and replaces with the result.
 /// 2. Operations that forward encoding dims from a source (like tensor.cast):
-///    The pattern calls getEncodingDimSource() and creates a new encoding_dim
-///    op on that source.
+///    The pattern calls getEncodingDimSource() and creates a new dim op on
+///    that source.
 ///
-struct ReifyEncodingDimFromInterface : public OpRewritePattern<EncodingDimOp> {
+struct ReifyDimFromInterface : public OpRewritePattern<DimOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  // This pattern may create new EncodingDimOp, so we need to bound recursion.
+  // This pattern may create new DimOp, so we need to bound recursion.
   void initialize() { setHasBoundedRewriteRecursion(); }
 
-  LogicalResult matchAndRewrite(EncodingDimOp dimOp,
+  LogicalResult matchAndRewrite(DimOp dimOp,
                                 PatternRewriter &rewriter) const override {
     OpResult result = dyn_cast<OpResult>(dimOp.getSource());
     if (!result) {
@@ -65,8 +65,7 @@ struct ReifyEncodingDimFromInterface : public OpRewritePattern<EncodingDimOp> {
       return failure();
     }
 
-    rewriter.replaceOpWithNewOp<EncodingDimOp>(dimOp, source,
-                                               dimOp.getConstantIndex());
+    rewriter.replaceOpWithNewOp<DimOp>(dimOp, source, dimOp.getConstantIndex());
     return success();
   }
 };
@@ -84,18 +83,18 @@ struct ReifyEncodingDimFromInterface : public OpRewritePattern<EncodingDimOp> {
 ///
 /// Before:
 ///   %result = linalg.generic {outs(%init : tensor<?x?xf32, #enc>)} ...
-///   %dim = iree_encoding.encoding_dim %result[0] : tensor<?x?xf32, #enc>
+///   %dim = iree_encoding.dim %result[0] : tensor<?x?xf32, #enc>
 ///
 /// After:
-///   %dim = iree_encoding.encoding_dim %init[0] : tensor<?x?xf32, #enc>
+///   %dim = iree_encoding.dim %init[0] : tensor<?x?xf32, #enc>
 ///
-struct ReifyEncodingDimThroughDPS : public OpRewritePattern<EncodingDimOp> {
+struct ReifyDimThroughDPS : public OpRewritePattern<DimOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  // This pattern creates a new EncodingDimOp, so we need to bound recursion.
+  // This pattern creates a new DimOp, so we need to bound recursion.
   void initialize() { setHasBoundedRewriteRecursion(); }
 
-  LogicalResult matchAndRewrite(EncodingDimOp dimOp,
+  LogicalResult matchAndRewrite(DimOp dimOp,
                                 PatternRewriter &rewriter) const override {
     OpResult result = dyn_cast<OpResult>(dimOp.getSource());
     if (!result) {
@@ -129,29 +128,29 @@ struct ReifyEncodingDimThroughDPS : public OpRewritePattern<EncodingDimOp> {
       return failure();
     }
 
-    rewriter.replaceOpWithNewOp<EncodingDimOp>(dimOp, tiedInit->get(),
-                                               dimOp.getConstantIndex());
+    rewriter.replaceOpWithNewOp<DimOp>(dimOp, tiedInit->get(),
+                                       dimOp.getConstantIndex());
     return success();
   }
 };
 
 //===----------------------------------------------------------------------===//
-// Fallback pattern: Reify encoding_dim using tensor.dim
+// Fallback pattern: Reify dim using tensor.dim
 //===----------------------------------------------------------------------===//
 
-/// Fallback pattern that resolves iree_encoding.encoding_dim to tensor.dim
+/// Fallback pattern that resolves iree_encoding.dim to tensor.dim
 /// for sources that aren't OpResults (e.g., block arguments).
 ///
 /// Before:
-///   %dim = iree_encoding.encoding_dim %arg0[0] : tensor<?x?xf32, #enc>
+///   %dim = iree_encoding.dim %arg0[0] : tensor<?x?xf32, #enc>
 ///
 /// After:
 ///   %dim = tensor.dim %arg0, %c0 : tensor<?x?xf32, #enc>
 ///
-struct ReifyEncodingDimToTensorDim : public OpRewritePattern<EncodingDimOp> {
+struct ReifyDimToTensorDim : public OpRewritePattern<DimOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(EncodingDimOp dimOp,
+  LogicalResult matchAndRewrite(DimOp dimOp,
                                 PatternRewriter &rewriter) const override {
     // Only handle non-OpResult sources (e.g., block arguments).
     if (isa<OpResult>(dimOp.getSource())) {
@@ -203,17 +202,17 @@ struct ReifyEncodingDimToTensorDim : public OpRewritePattern<EncodingDimOp> {
 // Pattern population
 //===----------------------------------------------------------------------===//
 
-void populateEncodingDimReificationPatterns(RewritePatternSet &patterns) {
+void populateDimReificationPatterns(RewritePatternSet &patterns) {
   // Interface-based pattern (handles set_encoding, tensor.cast via external
   // model).
-  patterns.add<ReifyEncodingDimFromInterface>(patterns.getContext());
+  patterns.add<ReifyDimFromInterface>(patterns.getContext());
 
   // Explicit pattern for DPS ops (interface-based approach not feasible for
   // DestinationStyleOpInterface since it's an interface, not a concrete op).
-  patterns.add<ReifyEncodingDimThroughDPS>(patterns.getContext());
+  patterns.add<ReifyDimThroughDPS>(patterns.getContext());
 
   // Fallback pattern for block arguments and other non-OpResult sources.
-  patterns.add<ReifyEncodingDimToTensorDim>(patterns.getContext());
+  patterns.add<ReifyDimToTensorDim>(patterns.getContext());
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding

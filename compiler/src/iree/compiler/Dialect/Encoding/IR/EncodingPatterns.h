@@ -11,9 +11,9 @@
 
 namespace mlir::iree_compiler::IREE::Encoding {
 
-/// Populates patterns for reifying `iree_encoding.encoding_dim` operations.
+/// Populates patterns for reifying `iree_encoding.dim` operations.
 ///
-/// Reification traces the producer chain to resolve encoding_dim ops:
+/// Reification traces the producer chain to resolve dim ops:
 /// - From ops implementing EncodingDimReificationInterface (set_encoding,
 /// tensor.cast)
 /// - Through DPS ops (linalg, etc.): forwards query to tied init operand
@@ -21,7 +21,7 @@ namespace mlir::iree_compiler::IREE::Encoding {
 /// Note: External models for EncodingDimReificationInterface (e.g., for
 /// tensor.cast) are registered via registerEncodingExternalModels() in
 /// ExternalInterfaces/.
-void populateEncodingDimReificationPatterns(RewritePatternSet &patterns);
+void populateDimReificationPatterns(RewritePatternSet &patterns);
 
 } // namespace mlir::iree_compiler::IREE::Encoding
 

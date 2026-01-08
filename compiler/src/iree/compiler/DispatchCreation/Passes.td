@@ -459,7 +459,7 @@ def InsertEncodingSpecializationMarkersPass :
   let description = [{
     Walks dispatch regions looking for tensors with encodings that implement
     DynamicLayoutSpecializerAttr. For such encodings, inserts:
-    1. iree_encoding.encoding_dim ops to query encoding dimension values
+    1. iree_encoding.dim ops to query encoding dimension values
     2. util.specialize marker ops with the specialization ranges
 
     These markers are later consumed by SpecializeExports to create specialized

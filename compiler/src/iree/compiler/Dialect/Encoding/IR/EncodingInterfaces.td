@@ -224,7 +224,7 @@ def IREEEncoding_SerializableAttr :
     InterfaceMethod<
       /*desc=*/[{
         Returns the number of encoding dimensions expected for this encoding.
-        This is used to validate `iree_encoding.encoding_dim` operations.
+        This is used to validate `iree_encoding.dim` operations.
         For example, a matmul encoding typically has 3 encoding dims (M, N, K).
         Returns std::nullopt if the number of encoding dims cannot be determined
         (e.g., for identity encodings or when the info is not available).
@@ -514,7 +514,7 @@ def IREEEncoding_EncodingDimReificationInterface :
   let description = [{
     Interface for operations that can provide encoding dimension values.
 
-    This interface enables reification of `iree_encoding.encoding_dim` operations
+    This interface enables reification of `iree_encoding.dim` operations
     by tracing through producer chains to find where encoding dimension values
     were originally captured.
 

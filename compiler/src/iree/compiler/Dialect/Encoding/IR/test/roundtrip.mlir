@@ -296,16 +296,16 @@ func.func @unset_encoding_with_encoding_dims(
 // -----
 
 #encoding = #iree_encoding.testing<>
-func.func @encoding_dim(%arg0: tensor<?x?xf32, #encoding>) -> (index, index, index) {
-  %m = iree_encoding.encoding_dim %arg0[0] : tensor<?x?xf32, #encoding>
-  %n = iree_encoding.encoding_dim %arg0[1] : tensor<?x?xf32, #encoding>
-  %k = iree_encoding.encoding_dim %arg0[2] : tensor<?x?xf32, #encoding>
+func.func @dim(%arg0: tensor<?x?xf32, #encoding>) -> (index, index, index) {
+  %m = iree_encoding.dim %arg0[0] : tensor<?x?xf32, #encoding>
+  %n = iree_encoding.dim %arg0[1] : tensor<?x?xf32, #encoding>
+  %k = iree_encoding.dim %arg0[2] : tensor<?x?xf32, #encoding>
   return %m, %n, %k : index, index, index
 }
 //      CHECK: #[[ENCODING:.+]] = #iree_encoding.testing<>
-//      CHECK: func.func @encoding_dim
+//      CHECK: func.func @dim
 // CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: tensor<?x?xf32, #[[ENCODING]]>
-//      CHECK:   %[[M:.+]] = iree_encoding.encoding_dim %[[ARG0]][0] : tensor<?x?xf32, #[[ENCODING]]>
-//      CHECK:   %[[N:.+]] = iree_encoding.encoding_dim %[[ARG0]][1] : tensor<?x?xf32, #[[ENCODING]]>
-//      CHECK:   %[[K:.+]] = iree_encoding.encoding_dim %[[ARG0]][2] : tensor<?x?xf32, #[[ENCODING]]>
+//      CHECK:   %[[M:.+]] = iree_encoding.dim %[[ARG0]][0] : tensor<?x?xf32, #[[ENCODING]]>
+//      CHECK:   %[[N:.+]] = iree_encoding.dim %[[ARG0]][1] : tensor<?x?xf32, #[[ENCODING]]>
+//      CHECK:   %[[K:.+]] = iree_encoding.dim %[[ARG0]][2] : tensor<?x?xf32, #[[ENCODING]]>
 //      CHECK:   return %[[M]], %[[N]], %[[K]]

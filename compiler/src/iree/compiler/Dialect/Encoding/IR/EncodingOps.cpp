@@ -112,10 +112,10 @@ LogicalResult UnsetEncodingOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
-// encoding.encoding_dim
+// encoding.dim
 //===----------------------------------------------------------------------===//
 
-LogicalResult EncodingDimOp::verify() {
+LogicalResult DimOp::verify() {
   auto sourceType = cast<RankedTensorType>(getSource().getType());
   Attribute encoding = sourceType.getEncoding();
 
@@ -144,20 +144,18 @@ LogicalResult EncodingDimOp::verify() {
   return success();
 }
 
-void EncodingDimOp::build(OpBuilder &builder, OperationState &result,
-                          Value source, int64_t index) {
+void DimOp::build(OpBuilder &builder, OperationState &result, Value source,
+                  int64_t index) {
   build(builder, result, builder.getIndexType(), source,
         builder.getIndexAttr(index));
 }
 
-void EncodingDimOp::getAsmResultNames(
-    function_ref<void(Value, StringRef)> setNameFn) {
+void DimOp::getAsmResultNames(function_ref<void(Value, StringRef)> setNameFn) {
   setNameFn(getResult(), "enc_dim");
 }
 
-/// Fold encoding_dim when the source comes from set_encoding with known
-/// encoding_dims.
-OpFoldResult EncodingDimOp::fold(FoldAdaptor adaptor) {
+/// Fold dim when the source comes from set_encoding with known encoding_dims.
+OpFoldResult DimOp::fold(FoldAdaptor adaptor) {
   int64_t index = getConstantIndex();
 
   // Trace through the producer chain to find set_encoding.
@@ -190,9 +188,9 @@ OpFoldResult EncodingDimOp::fold(FoldAdaptor adaptor) {
   return {};
 }
 
-void EncodingDimOp::getCanonicalizationPatterns(RewritePatternSet &results,
-                                                MLIRContext *context) {
-  populateEncodingDimReificationPatterns(results);
+void DimOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                        MLIRContext *context) {
+  populateDimReificationPatterns(results);
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding

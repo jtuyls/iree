@@ -534,7 +534,7 @@ def Util_SpecializeOp : Util_PureOp<"specialize", [
 
     Example:
     ```mlir
-    %dim = iree_encoding.encoding_dim %tensor[0] : tensor<?x?xf32, #enc>
+    %dim = iree_encoding.dim %tensor[0] : tensor<?x?xf32, #enc>
     %specialized = util.specialize %dim : index
     ```
 

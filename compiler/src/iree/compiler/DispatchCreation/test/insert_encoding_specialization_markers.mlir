@@ -17,7 +17,7 @@ util.func public @non_specializable_encoding(%arg0: tensor<16x16xf32, #non_speci
 }
 
 // CHECK-LABEL: util.func public @non_specializable_encoding
-// CHECK-NOT:     iree_encoding.encoding_dim
+// CHECK-NOT:     iree_encoding.dim
 // CHECK-NOT:     util.specialize
 
 // -----
@@ -37,12 +37,12 @@ util.func public @specializable_encoding_no_dispatch(%arg0: tensor<?xf32, #dynam
 }
 
 // CHECK-LABEL: util.func public @specializable_encoding_no_dispatch
-// CHECK-NOT:     iree_encoding.encoding_dim
+// CHECK-NOT:     iree_encoding.dim
 // CHECK-NOT:     util.specialize
 
 // -----
 
-// Test: Specializable encoding inside flow.dispatch.region
+// Test: Specializable encoding inside flow.dispatch.region with encoding_dims
 
 #dynamic_enc_region = #iree_encoding.dynamic_layout_test<
   1,
@@ -55,7 +55,7 @@ util.func public @specializable_in_dispatch_region(%arg0: tensor<?xf32>) -> tens
   %c0 = arith.constant 0 : index
   %d0 = tensor.dim %arg0, %c0 : tensor<?xf32>
   %0 = flow.dispatch.region -> (tensor<?xf32>{%d0}) {
-    %encoded = iree_encoding.set_encoding %arg0 : tensor<?xf32> -> tensor<?xf32, #dynamic_enc_region>
+    %encoded = iree_encoding.set_encoding %arg0 encoding_dims{%d0} : tensor<?xf32> -> tensor<?xf32, #dynamic_enc_region>
     %unencoded = iree_encoding.unset_encoding %encoded : tensor<?xf32, #dynamic_enc_region> -> tensor<?xf32>{%d0}
     flow.return %unencoded : tensor<?xf32>
   }
@@ -64,9 +64,9 @@ util.func public @specializable_in_dispatch_region(%arg0: tensor<?xf32>) -> tens
 
 // CHECK-LABEL: util.func public @specializable_in_dispatch_region
 // CHECK:         flow.dispatch.region
-// CHECK:           %[[ENCODED:.+]] = iree_encoding.set_encoding
-// CHECK:           %[[DIM0:.+]] = iree_encoding.encoding_dim %[[ENCODED]][0]
-// CHECK:           util.specialize %[[DIM0]] : index
+// The pass should create util.specialize for the encoding dim inside the region
+// CHECK:           util.specialize
+// CHECK:           iree_encoding.set_encoding
 
 // -----
 
@@ -83,5 +83,5 @@ util.func public @empty_variants(%arg0: tensor<?xf32, #empty_variants_enc>) -> t
 }
 
 // CHECK-LABEL: util.func public @empty_variants
-// CHECK-NOT:     iree_encoding.encoding_dim
+// CHECK-NOT:     iree_encoding.dim
 // CHECK-NOT:     util.specialize

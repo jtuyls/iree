@@ -96,10 +96,10 @@ def IREEEncoding_UnsetEncodingOp : IREEEncoding_PureOp<"unset_encoding", [
 }
 
 //===----------------------------------------------------------------------===//
-// encoding_dim op.
+// dim op.
 //===----------------------------------------------------------------------===//
 
-def IREEEncoding_EncodingDimOp : IREEEncoding_PureOp<"encoding_dim", [
+def IREEEncoding_DimOp : IREEEncoding_PureOp<"dim", [
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
     Pure
   ]> {
@@ -115,7 +115,7 @@ def IREEEncoding_EncodingDimOp : IREEEncoding_PureOp<"encoding_dim", [
     - index 2 returns K
 
     For a matmul LHS tensor with shape `[M, K]`, `tensor.dim` can only query
-    M and K, but `encoding_dim` can query M, N, and K since all three are
+    M and K, but `iree_encoding.dim` can query M, N, and K since all three are
     captured in the encoding.
 
     This operation is resolved by tracing the producer chain:
@@ -126,10 +126,10 @@ def IREEEncoding_EncodingDimOp : IREEEncoding_PureOp<"encoding_dim", [
 
     ```mlir
     // Query the M dimension (index 0) of a matmul LHS encoding
-    %m = iree_encoding.encoding_dim %encoded[0] : tensor<?x?xf32, #encoding>
+    %m = iree_encoding.dim %encoded[0] : tensor<?x?xf32, #encoding>
 
     // Query the N dimension (index 1) - available even though not in LHS shape
-    %n = iree_encoding.encoding_dim %encoded[1] : tensor<?x?xf32, #encoding>
+    %n = iree_encoding.dim %encoded[1] : tensor<?x?xf32, #encoding>
     ```
   }];
 
