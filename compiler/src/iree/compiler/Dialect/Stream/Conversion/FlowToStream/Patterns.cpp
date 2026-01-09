@@ -1108,6 +1108,11 @@ struct ConvertExecutableOp
           rewriter, exportOp.getLoc(), exportOp.getSymName(),
           exportOp.getFunctionRefAttr());
       newOp->setDialectAttrs(exportOp->getDialectAttrs());
+      // Copy specialization ordinals attribute if present.
+      if (auto specOrdinals =
+              exportOp->getAttr("iree.encoding.specialization_ordinals")) {
+        newOp->setAttr("iree.encoding.specialization_ordinals", specOrdinals);
+      }
       if (!exportOp.getWorkgroupCount().empty()) {
         mlir::IRMapping mapper;
         exportOp.getWorkgroupCount().cloneInto(&newOp.getWorkgroupCount(),

@@ -53,10 +53,16 @@ def FLOW_DispatchRegionOp : FLOW_PureOp<"dispatch.region", [
     region represent the workload for the dispatch, and returns the number of
     workgroups for the dispatch. The region is lowered directly to
     `workload_count` region of `dispatch.workgroups`.
+
+    The optional `specialization_values` operands carry values that need to be
+    specialized on (e.g., encoding dimensions). These are propagated to the
+    workload when converting to `dispatch.workgroups` and tracked via the
+    `specialization_ordinals` attribute on the executable export.
   }];
 
   let arguments = (ins FLOW_ShapeDynamicDims:$result_dims,
-                       Variadic<FLOW_Dim>:$workload);
+                       Variadic<FLOW_Dim>:$workload,
+                       Variadic<Index>:$specialization_values);
 
   let results = (outs Variadic<AnyType>:$result);
 

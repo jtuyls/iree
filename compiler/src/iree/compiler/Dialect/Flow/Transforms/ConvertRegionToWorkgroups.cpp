@@ -154,11 +154,29 @@ rewriteFlowDispatchRegionToFlowDispatchWorkgroups(
     }
   }
 
+  // Build workload: original workload + specialization values
+  SmallVector<Value> workload(regionOp.getWorkload());
+  SmallVector<int64_t> specializationOrdinals;
+
+  // Add specialization values to workload and track their ordinals
+  for (Value specValue : regionOp.getSpecializationValues()) {
+    int64_t ordinal = workload.size();
+    specializationOrdinals.push_back(ordinal);
+    workload.push_back(specValue);
+  }
+
   // Create the shell dispatch.workgroup ops.
   auto workgroupsOp = IREE::Flow::DispatchWorkgroupsOp::create(
-      rewriter, loc, regionOp.getWorkload(), regionOp.getResultTypes(),
+      rewriter, loc, workload, regionOp.getResultTypes(),
       regionOp.getResultDims(), arguments, argumentDims, tiedArguments);
   workgroupsOp->setDialectAttrs(regionOp->getDialectAttrs());
+
+  // If there are specialization values, store their ordinals as an attribute
+  if (!specializationOrdinals.empty()) {
+    workgroupsOp->setAttr(
+        "iree.encoding.specialization_ordinals",
+        rewriter.getDenseI64ArrayAttr(specializationOrdinals));
+  }
 
   // Populate the workgroup count region.
   if (!regionOp.getWorkgroupCount().empty()) {

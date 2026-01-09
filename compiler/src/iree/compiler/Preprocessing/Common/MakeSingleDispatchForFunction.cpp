@@ -140,7 +140,8 @@ void MakeSingleDispatchForFunctionPass::runOnOperation() {
       llvm::map_to_vector(results, [](Value v) -> Type { return v.getType(); });
   auto dispatchRegionOp = IREE::Flow::DispatchRegionOp::create(
       rewriter, funcOp.getLoc(), resultTypes,
-      /*result_dims=*/ValueRange{}, /*workload=*/ValueRange{});
+      /*result_dims=*/ValueRange{}, /*workload=*/ValueRange{},
+      /*specialization_values=*/ValueRange{});
   Region &regionOpBody = dispatchRegionOp.getBody();
   Block *newBlock = rewriter.createBlock(&regionOpBody, regionOpBody.begin());
   for (Operation *op : secondSlice) {

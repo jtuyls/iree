@@ -217,7 +217,8 @@ static std::optional<PaddedValue> padProducerOfValue(RewriterBase &rewriter,
 
   auto newDispatchOp = IREE::Flow::DispatchRegionOp::create(
       rewriter, producerDispatch->getLoc(), newResultTypes,
-      newResultDynamicDims, producerDispatch.getWorkload());
+      newResultDynamicDims, producerDispatch.getWorkload(),
+      producerDispatch.getSpecializationValues());
 
   // Move over the body of the old dispatch.
   Region &newBody = newDispatchOp.getBody();

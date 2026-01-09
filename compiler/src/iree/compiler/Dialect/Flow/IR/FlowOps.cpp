@@ -419,13 +419,23 @@ ParseResult DispatchRegionOp::parse(OpAsmParser &parser,
   std::unique_ptr<Region> bodyRegion = std::make_unique<Region>();
   std::unique_ptr<Region> workloadCountRegion = std::make_unique<Region>();
   SmallVector<OpAsmParser::UnresolvedOperand> workloadOperands;
+  SmallVector<OpAsmParser::UnresolvedOperand> specializationOperands;
   SMLoc workloadOperandsLoc;
+  SMLoc specializationOperandsLoc;
   (void)workloadOperandsLoc;
+  (void)specializationOperandsLoc;
   if (succeeded(parser.parseOptionalLSquare())) {
     workloadOperandsLoc = parser.getCurrentLocation();
     if (parser.parseOperandList(workloadOperands))
       return failure();
     if (parser.parseRSquare())
+      return failure();
+  }
+  // Parse optional specialize(...) clause
+  if (succeeded(parser.parseOptionalKeyword("specialize"))) {
+    specializationOperandsLoc = parser.getCurrentLocation();
+    if (parser.parseOperandList(specializationOperands,
+                                OpAsmParser::Delimiter::Paren))
       return failure();
   }
   if (succeeded(parser.parseOptionalArrow())) {
@@ -460,10 +470,12 @@ ParseResult DispatchRegionOp::parse(OpAsmParser &parser,
 
   result.addRegion(std::move(bodyRegion));
   result.addRegion(std::move(workloadCountRegion));
-  result.addAttribute("operandSegmentSizes",
-                      parser.getBuilder().getDenseI32ArrayAttr(
-                          {static_cast<int32_t>(allOperands.size()),
-                           static_cast<int32_t>(workloadOperands.size())}));
+  result.addAttribute(
+      "operandSegmentSizes",
+      parser.getBuilder().getDenseI32ArrayAttr(
+          {static_cast<int32_t>(allOperands.size()),
+           static_cast<int32_t>(workloadOperands.size()),
+           static_cast<int32_t>(specializationOperands.size())}));
 
   if (parser.resolveOperands(allOperands, parser.getBuilder().getIndexType(),
                              result.operands))
@@ -471,6 +483,11 @@ ParseResult DispatchRegionOp::parse(OpAsmParser &parser,
   if (parser.resolveOperands(workloadOperands,
                              parser.getBuilder().getIndexType(),
                              workloadOperandsLoc, result.operands)) {
+    return failure();
+  }
+  if (parser.resolveOperands(specializationOperands,
+                             parser.getBuilder().getIndexType(),
+                             specializationOperandsLoc, result.operands)) {
     return failure();
   }
 
@@ -483,6 +500,9 @@ void DispatchRegionOp::print(OpAsmPrinter &p) {
   elidedAttrs.push_back("operandSegmentSizes");
   if (!getWorkload().empty()) {
     p << "[" << getWorkload() << "]";
+  }
+  if (!getSpecializationValues().empty()) {
+    p << " specialize(" << getSpecializationValues() << ")";
   }
   p << " -> (";
   unsigned resultDimCounter = 0;
@@ -594,9 +614,9 @@ bool dropUnusedAndRedundantDispatchRegionResults(
     return false;
 
   // Create new region and move over the body.
-  auto newRegionOp =
-      Flow::DispatchRegionOp::create(rewriter, regionOp.getLoc(), resultTypes,
-                                     dynamicDims, regionOp.getWorkload());
+  auto newRegionOp = Flow::DispatchRegionOp::create(
+      rewriter, regionOp.getLoc(), resultTypes, dynamicDims,
+      regionOp.getWorkload(), regionOp.getSpecializationValues());
   newRegionOp.getBody().takeBody(regionOp.getBody());
 
   // Update terminator.

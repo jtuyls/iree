@@ -128,26 +128,13 @@ static func::FuncOp createWorkgroupFunc(IREE::Stream::TensorEncodeOp encodeOp,
             builder, loc, block.getArgument(argIndex++),
             builder.getIndexAttr(ordinalCount++)));
   }
-  // Check which encoding dims came from util.specialize ops so we can
-  // recreate them inside the dispatch function.
-  SmallVector<bool> isSpecialized;
-  for (Value encodingDim : encodeOp.getEncodingDims()) {
-    isSpecialized.push_back(
-        encodingDim.getDefiningOp<IREE::Util::SpecializeOp>() != nullptr);
-  }
-
+  // Note: We no longer need to recreate util.specialize ops inside the
+  // dispatch function. Instead, specialization is tracked via the
+  // iree.encoding.specialization_ordinals attribute on the export op.
   for (size_t i = 0; i < encodeOp.getEncodingDims().size(); ++i) {
     Value ordinalValue = IREE::TensorExt::DispatchWorkloadOrdinalOp::create(
         builder, loc, block.getArgument(argIndex++),
         builder.getIndexAttr(ordinalCount++));
-
-    // If this encoding dim came from a util.specialize op, recreate it inside
-    // the dispatch to preserve the specialization marker.
-    if (isSpecialized[i]) {
-      ordinalValue = IREE::Util::SpecializeOp::create(builder, loc, ordinalValue)
-                         .getResult();
-    }
-
     encodingDimsValues.push_back(ordinalValue);
   }
 
@@ -180,13 +167,9 @@ static func::FuncOp createWorkgroupFunc(IREE::Stream::TensorEncodeOp encodeOp,
           encodingDimsValues);
     }
     if (destinationType.getEncoding()) {
-      // The encodingDimsValues already include util.specialize ops for
-      // dimensions that were specialized in the original IR (hoisted from
-      // outside the dispatch by checking if the encoding dim came from a
-      // util.specialize op).
       value = IREE::Encoding::SetEncodingOp::create(builder, loc,
-                                                     destinationType, value,
-                                                     encodingDimsValues);
+                                                    destinationType, value,
+                                                    encodingDimsValues);
     }
   }
 
@@ -199,12 +182,16 @@ static func::FuncOp createWorkgroupFunc(IREE::Stream::TensorEncodeOp encodeOp,
 }
 
 /// Creates an export op pointing at the `funcOp` function.
+/// Also adds the iree.encoding.specialization_ordinals attribute for encoding
+/// dims that need specialization.
 static IREE::Stream::ExecutableExportOp
 createExportOp(RewriterBase &rewriter, Location loc,
                IREE::Stream::TensorEncodeOp encodeOp,
                IREE::Stream::ExecutableOp executableOp, func::FuncOp funcOp) {
   SmallVector<Type> workloadTypes;
   SmallVector<Location> workloadLocs;
+  int64_t ordinalCount = 0;
+
   for (auto argument : encodeOp.getSourceEncodingDims()) {
     Type argumentType = argument.getType();
     if (!isa<IndexType>(argumentType)) {
@@ -212,6 +199,7 @@ createExportOp(RewriterBase &rewriter, Location loc,
     }
     workloadTypes.push_back(argumentType);
     workloadLocs.push_back(argument.getLoc());
+    ordinalCount++;
   }
   for (auto argument : encodeOp.getResultEncodingDims()) {
     Type argumentType = argument.getType();
@@ -220,21 +208,41 @@ createExportOp(RewriterBase &rewriter, Location loc,
     }
     workloadTypes.push_back(argumentType);
     workloadLocs.push_back(argument.getLoc());
+    ordinalCount++;
   }
+
+  // Track which encoding dims need specialization and their workload ordinals.
+  SmallVector<int64_t> specializationOrdinals;
+
   // Add encoding_dims to workload (e.g., M, N, K for matmul encodings).
-  for (Value argument : encodeOp.getEncodingDims()) {
+  for (auto [idx, argument] : llvm::enumerate(encodeOp.getEncodingDims())) {
     Type argumentType = argument.getType();
     if (!isa<IndexType>(argumentType)) {
       continue;
     }
     workloadTypes.push_back(argumentType);
     workloadLocs.push_back(argument.getLoc());
+
+    // Check if this encoding dim came from a util.specialize op - if so,
+    // track its ordinal for specialization.
+    if (argument.getDefiningOp<IREE::Util::SpecializeOp>()) {
+      specializationOrdinals.push_back(ordinalCount);
+    }
+    ordinalCount++;
   }
 
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToStart(&executableOp.getBody().front());
   auto exportOp = IREE::Stream::ExecutableExportOp::create(
       rewriter, loc, funcOp.getName(), SymbolRefAttr::get(funcOp));
+
+  // Add specialization ordinals attribute if any encoding dims need
+  // specialization.
+  if (!specializationOrdinals.empty()) {
+    exportOp->setAttr("iree.encoding.specialization_ordinals",
+                      rewriter.getDenseI64ArrayAttr(specializationOrdinals));
+  }
+
   Block *block = rewriter.createBlock(&exportOp.getWorkgroupCount(),
                                       exportOp.getWorkgroupCount().end(),
                                       workloadTypes, workloadLocs);

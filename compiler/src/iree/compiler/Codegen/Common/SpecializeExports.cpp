@@ -504,56 +504,6 @@ static void specializeExportedFunctionByRangeAttribute(
                              specializationRanges, ordinals);
 }
 
-/// Collects workload information from util.specialize ops.
-/// Returns the workload mapping from all specialize ops in the function.
-static FailureOr<SmallVector<AssumedWorkloadSize>> getWorkloadFromSpecializeOps(
-    func::FuncOp func, SmallVector<IREE::Util::SpecializeOp> &specializeOps) {
-  SmallVector<AssumedWorkloadSize> workloadAssumptions;
-
-  for (auto specializeOp : specializeOps) {
-    Value operand = specializeOp.getOperand();
-
-    // Trace back to the workload ordinal
-    auto workloadOrdinal =
-        operand.getDefiningOp<IREE::TensorExt::DispatchWorkloadOrdinalOp>();
-    if (!workloadOrdinal) {
-      // Try walking through assume.int ops
-      if (auto assumeOp = operand.getDefiningOp<IREE::Util::AssumeIntOp>()) {
-        // The assume op may have multiple results, find which one matches
-        for (auto [idx, result] : llvm::enumerate(assumeOp.getResults())) {
-          if (result == operand) {
-            Value assumeOperand = assumeOp.getOperand(idx);
-            workloadOrdinal = assumeOperand.getDefiningOp<
-                IREE::TensorExt::DispatchWorkloadOrdinalOp>();
-            break;
-          }
-        }
-      }
-    }
-
-    if (!workloadOrdinal) {
-      LLVM_DEBUG({
-        llvm::dbgs() << "Could not find workload ordinal for specialize op\n\t";
-        llvm::dbgs() << specializeOp << "\n";
-      });
-      return failure();
-    }
-
-    AssumedWorkloadSize assumption;
-    assumption.workloadOrdinal = workloadOrdinal.getOrdinal().getZExtValue();
-
-    if (auto assumeOp = operand.getDefiningOp<IREE::Util::AssumeIntOp>()) {
-      assumption.assumptionOrOrdinal = cast<OpResult>(operand);
-    } else {
-      assumption.assumptionOrOrdinal = workloadOrdinal->getOpResult(0);
-    }
-
-    workloadAssumptions.push_back(assumption);
-  }
-
-  return workloadAssumptions;
-}
-
 /// Builds specialization ranges from SpecializableLayoutAttr.
 /// The ranges are extracted from the attribute's specialization_ranges field.
 static IREE::Util::MultiIntAssumptionArrayAttr
@@ -654,44 +604,74 @@ static void specializeExportedFunctionBySpecializableLayout(
   replaceSpecializableLayoutsInFunction(func, -1);
 }
 
-/// Walks the function |func| exported by |exportOp| and looks for
-/// util.specialize ops that mark values for specialization.
-/// The specialization ranges are obtained from SpecializableLayoutAttr.
-static void specializeExportedFunctionBySpecializeOps(
+/// Specializes based on the iree.encoding.specialization_ordinals attribute
+/// on the export. This attribute contains workload ordinals that should be
+/// used for specialization based on encoding dimensions.
+static void specializeExportedFunctionBySpecializationOrdinals(
     IREE::HAL::ExecutableExportOp exportOp, func::FuncOp func,
     llvm::SmallDenseSet<int64_t> &ordinals) {
-  // Collect all util.specialize ops
-  SmallVector<IREE::Util::SpecializeOp> specializeOps;
-  func.walk([&](IREE::Util::SpecializeOp op) { specializeOps.push_back(op); });
-
-  if (specializeOps.empty()) {
+  // Check for the specialization ordinals attribute
+  auto specOrdinalsAttr =
+      exportOp->getAttrOfType<DenseI64ArrayAttr>(
+          "iree.encoding.specialization_ordinals");
+  if (!specOrdinalsAttr || specOrdinalsAttr.empty()) {
     return;
   }
 
   LLVM_DEBUG({
-    llvm::dbgs() << "Found " << specializeOps.size()
-                 << " util.specialize ops in function\n";
+    llvm::dbgs() << "Found specialization ordinals attribute with "
+                 << specOrdinalsAttr.size() << " ordinals\n";
   });
 
   // Find SpecializableLayoutAttr to get the specialization ranges
   auto specializableAttr = findSpecializableLayoutInFunction(func);
   if (!specializableAttr) {
     LLVM_DEBUG(llvm::dbgs()
-               << "No SpecializableLayoutAttr found for specialize ops\n");
-    // Remove the specialize ops since we can't use them
-    for (auto op : specializeOps) {
-      op.getResult().replaceAllUsesWith(op.getOperand());
-      op.erase();
-    }
+               << "No SpecializableLayoutAttr found for specialization "
+                  "ordinals\n");
     return;
   }
 
-  // Get workload mapping from the specialize ops
-  FailureOr<SmallVector<AssumedWorkloadSize>> maybeWorkloadMapping =
-      getWorkloadFromSpecializeOps(func, specializeOps);
-  if (failed(maybeWorkloadMapping)) {
-    LLVM_DEBUG(llvm::dbgs()
-               << "Failed to get workload mapping from specialize ops\n");
+  // Build workload assumptions from the ordinals
+  SmallVector<AssumedWorkloadSize> workloadAssumptions;
+  OpBuilder builder(func);
+  builder.setInsertionPointToStart(&func.getBody().front());
+
+  for (int64_t ordinal : specOrdinalsAttr.asArrayRef()) {
+    // Look for the workload ordinal op with this ordinal
+    IREE::TensorExt::DispatchWorkloadOrdinalOp workloadOrdinal;
+    func.walk([&](IREE::TensorExt::DispatchWorkloadOrdinalOp op) {
+      if (op.getOrdinal().getZExtValue() == static_cast<uint64_t>(ordinal)) {
+        workloadOrdinal = op;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+
+    if (!workloadOrdinal) {
+      LLVM_DEBUG({
+        llvm::dbgs() << "Could not find workload ordinal op for ordinal "
+                     << ordinal << "\n";
+      });
+      continue;
+    }
+
+    AssumedWorkloadSize assumption;
+    assumption.workloadOrdinal = ordinal;
+
+    // Check if there's an assume.int on the workload ordinal result
+    if (auto assumeOp = workloadOrdinal.getResult()
+                            .getDefiningOp<IREE::Util::AssumeIntOp>()) {
+      assumption.assumptionOrOrdinal = cast<OpResult>(workloadOrdinal.getResult());
+    } else {
+      assumption.assumptionOrOrdinal = workloadOrdinal->getOpResult(0);
+    }
+
+    workloadAssumptions.push_back(assumption);
+  }
+
+  if (workloadAssumptions.empty()) {
+    LLVM_DEBUG(llvm::dbgs() << "No valid workload assumptions built\n");
     return;
   }
 
@@ -702,25 +682,16 @@ static void specializeExportedFunctionBySpecializeOps(
 
   if (!specializationRanges || specializationRanges.empty()) {
     LLVM_DEBUG(llvm::dbgs() << "No specialization ranges in layout attr\n");
-    // Remove the specialize ops and just use fallback
-    for (auto op : specializeOps) {
-      op.getResult().replaceAllUsesWith(op.getOperand());
-      op.erase();
-    }
     replaceSpecializableLayoutsInFunction(func, -1);
     return;
   }
 
-  // Remove the specialize ops before cloning (they'll be cloned otherwise)
-  for (auto op : specializeOps) {
-    op.getResult().replaceAllUsesWith(op.getOperand());
-    op.erase();
-  }
-
-  // Call the workload-based specialization function directly
-  specializeExportedFunctionWithWorkload(exportOp, func,
-                                         maybeWorkloadMapping.value(),
+  // Call the workload-based specialization function
+  specializeExportedFunctionWithWorkload(exportOp, func, workloadAssumptions,
                                          specializationRanges, ordinals);
+
+  // Remove the attribute after processing
+  exportOp->removeAttr("iree.encoding.specialization_ordinals");
 }
 
 namespace {
@@ -775,9 +746,10 @@ public:
       specializeExportedFunctionByRangeAttribute(exportOp, exportedFunc, helper,
                                                  ordinalSet);
 
-      // Then try util.specialize op-based specialization (new flow)
-      specializeExportedFunctionBySpecializeOps(exportOp, exportedFunc,
-                                                ordinalSet);
+      // Try specialization based on ordinals attribute (for dispatch regions
+      // and encoding dispatches)
+      specializeExportedFunctionBySpecializationOrdinals(exportOp, exportedFunc,
+                                                         ordinalSet);
 
       // Handle SpecializableLayoutAttr-based specialization
       specializeExportedFunctionBySpecializableLayout(exportOp, exportedFunc,

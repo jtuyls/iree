@@ -372,7 +372,7 @@ FailureOr<IREE::Flow::DispatchRegionOp> appendDispatchRegionResults(
   // Create new DispatchRegionOp and move over the body.
   auto newRegionOp = IREE::Flow::DispatchRegionOp::create(
       rewriter, regionOp->getLoc(), resultTypes, regionDynamicDims,
-      regionOp.getWorkload());
+      regionOp.getWorkload(), regionOp.getSpecializationValues());
   rewriter.inlineRegionBefore(regionOp.getBody(), newRegionOp.getBody(),
                               newRegionOp.getBody().begin());
   rewriter.replaceOp(
@@ -395,7 +395,7 @@ makeEmptyDispatchRegion(OpBuilder &builder, Location loc, ValueRange workload) {
   // Create RegionOp.
   auto regionOp = IREE::Flow::DispatchRegionOp::create(
       builder, loc, /*resultTypes=*/TypeRange(), /*dynamicDims=*/ValueRange(),
-      workload);
+      workload, /*specialization_values=*/ValueRange{});
   Block &body = regionOp.getBody().emplaceBlock();
   builder.setInsertionPointToStart(&body);
   IREE::Flow::ReturnOp::create(builder, loc, ValueRange());
@@ -745,7 +745,8 @@ FailureOr<Operation *> hoistOutOfDispatch(RewriterBase &rewriter,
   rewriter.setInsertionPoint(dispatchRegionOp);
   auto newDispatchRegionOp = IREE::Flow::DispatchRegionOp::create(
       rewriter, dispatchRegionOp->getLoc(), newResultTypes,
-      newDispatchResultDynamicDims, dispatchRegionOp.getWorkload());
+      newDispatchResultDynamicDims, dispatchRegionOp.getWorkload(),
+      dispatchRegionOp.getSpecializationValues());
   rewriter.inlineRegionBefore(dispatchRegionOp.getBody(),
                               newDispatchRegionOp.getBody(),
                               newDispatchRegionOp.getBody().begin());

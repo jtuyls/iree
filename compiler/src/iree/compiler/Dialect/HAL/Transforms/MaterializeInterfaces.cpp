@@ -427,6 +427,13 @@ declareEntryPointOps(IREE::Stream::ExecutableOp sourceExecutableOp,
           /*subgroup_size=*/IntegerAttr{},
           /*workgroup_local_memory=*/IntegerAttr{});
 
+      // Copy specialization ordinals attribute if present.
+      if (auto specOrdinals =
+              exportOp->getAttr("iree.encoding.specialization_ordinals")) {
+        newExportOp->setAttr("iree.encoding.specialization_ordinals",
+                             specOrdinals);
+      }
+
       // Map the original export name to the new variant export.
       auto oldRefAttr =
           SymbolRefAttr::get(sourceExecutableOp.getNameAttr(),

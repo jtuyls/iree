@@ -867,7 +867,8 @@ hoistTensorReshapesOutOfDispatchRegion(
 
   // 5. Create the new dispatch op.
   auto newDispatchOp = IREE::Flow::DispatchRegionOp::create(
-      rewriter, loc, newReturnTypes, newDynamicDims, dispatchOp.getWorkload());
+      rewriter, loc, newReturnTypes, newDynamicDims, dispatchOp.getWorkload(),
+      dispatchOp.getSpecializationValues());
 
   // 5a. Move the body over, but replace the `flow.return` to use the new yield
   // values.

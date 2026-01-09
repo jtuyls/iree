@@ -143,6 +143,12 @@ static LogicalResult outlineDispatchWorkgroupsOp(
       SymbolRefAttr::get(workgroupFuncOp));
   exportOp->setDialectAttrs(dispatchWorkgroupsOp->getDialectAttrs());
 
+  // Copy specialization ordinals attribute if present.
+  if (auto specOrdinals =
+          dispatchWorkgroupsOp->getAttr("iree.encoding.specialization_ordinals")) {
+    exportOp->setAttr("iree.encoding.specialization_ordinals", specOrdinals);
+  }
+
   // Move over the workgroup count region, if present.
   if (!dispatchWorkgroupsOp.getWorkgroupCount().empty()) {
     exportOp.getWorkgroupCount().takeBody(
