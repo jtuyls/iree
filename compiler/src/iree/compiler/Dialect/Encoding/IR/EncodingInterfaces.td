@@ -223,14 +223,16 @@ def IREEEncoding_SerializableAttr :
     >,
     InterfaceMethod<
       /*desc=*/[{
-        Returns the number of encoding dimensions expected for this encoding.
-        This is used to validate `iree_encoding.dim` operations.
-        For example, a matmul encoding typically has 3 encoding dims (M, N, K).
-        Returns std::nullopt if the number of encoding dims cannot be determined
-        (e.g., for identity encodings or when the info is not available).
+        Returns the number of dynamic encoding dimensions expected for this
+        encoding. This is used to validate `encoding_dims` operands on
+        `set_encoding`, `unset_encoding`, and `iree_encoding.dim` ops.
+        Only dynamic dimensions need to be carried as operands.
+        For example, a matmul encoding with iteration_sizes = [?, 128, 64]
+        has 1 dynamic encoding dim (the M dimension).
+        Returns std::nullopt if the number cannot be determined.
       }],
       /*retTy=*/"std::optional<unsigned>",
-      /*methodName=*/"getNumEncodingDims",
+      /*methodName=*/"getNumDynamicEncodingDims",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{

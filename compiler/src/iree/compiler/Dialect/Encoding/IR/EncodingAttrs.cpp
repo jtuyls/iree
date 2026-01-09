@@ -452,12 +452,19 @@ EncodingAttr::cloneWithNewOperandIndexingMap(AffineMap newIndexingMap) {
 
 bool EncodingAttr::isSerialized() const { return false; }
 
-std::optional<unsigned> EncodingAttr::getNumEncodingDims() const {
+std::optional<unsigned> EncodingAttr::getNumDynamicEncodingDims() const {
   ArrayAttr iterationSizes = getIterationSizes();
   if (!iterationSizes) {
     return std::nullopt;
   }
-  return iterationSizes.size();
+  unsigned count = 0;
+  for (Attribute attr : iterationSizes) {
+    int64_t value = cast<IntegerAttr>(attr).getInt();
+    if (ShapedType::isDynamic(value)) {
+      count++;
+    }
+  }
+  return count;
 }
 
 Attribute EncodingAttr::cloneWithLayouts(ArrayRef<Attribute> layouts) const {
@@ -857,7 +864,8 @@ bool SpecializableLayoutAttr::isSerialized() const {
   return false;
 }
 
-std::optional<unsigned> SpecializableLayoutAttr::getNumEncodingDims() const {
+std::optional<unsigned>
+SpecializableLayoutAttr::getNumDynamicEncodingDims() const {
   return getNumDims();
 }
 
@@ -922,7 +930,7 @@ Value SpecializableLayoutAttr::calculateStorageSizeInBytes(
 
 bool DynamicLayoutTestAttr::isSerialized() const { return false; }
 
-std::optional<unsigned> DynamicLayoutTestAttr::getNumEncodingDims() const {
+std::optional<unsigned> DynamicLayoutTestAttr::getNumDynamicEncodingDims() const {
   return getNumDims();
 }
 

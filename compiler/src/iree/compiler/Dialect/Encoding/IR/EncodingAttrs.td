@@ -113,7 +113,7 @@ def EncodingAttr :
       DeclareAttrInterfaceMethods<IREEEncoding_SerializableAttr, [
         "isSerialized",
         "cloneWithLayouts",
-        "getNumEncodingDims",
+        "getNumDynamicEncodingDims",
       ]>,
       DeclareAttrInterfaceMethods<IREEEncoding_ContractionEncodingAttrInterface, [
         "getReductionDims",
@@ -424,7 +424,7 @@ def SpecializableLayoutAttr :
     IREEEncoding_AttrDef<"SpecializableLayout", [
       DeclareAttrInterfaceMethods<IREEEncoding_SerializableAttr, [
         "isSerialized",
-        "getNumEncodingDims",
+        "getNumDynamicEncodingDims",
         "calculateStorageSizeInBytes",
       ]>
     ]> {
@@ -470,7 +470,7 @@ def DynamicLayoutTestAttr :
       DeclareAttrInterfaceMethods<IREEEncoding_SerializableAttr, [
         "isSerialized",
         "cloneWithLayouts",
-        "getNumEncodingDims",
+        "getNumDynamicEncodingDims",
       ]>,
       DeclareAttrInterfaceMethods<IREEEncoding_DynamicLayoutSpecializerAttr, [
         "supportsSpecialization",

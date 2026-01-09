@@ -33,7 +33,9 @@ LogicalResult SetEncodingOp::verify() {
     return emitOpError(
         "source of set_encoding op cannot have a tensor encoding");
   }
-  if (!isa_and_nonnull<SerializableAttr>(getResultType().getEncoding())) {
+  auto serializableAttr =
+      dyn_cast_or_null<SerializableAttr>(getResultType().getEncoding());
+  if (!serializableAttr) {
     return emitOpError(
         "result of set_encoding op expected to have a valid tensor encoding");
   }
@@ -43,6 +45,15 @@ LogicalResult SetEncodingOp::verify() {
   }
   if (failed(verifyCompatibleShape(getResultType(), getSourceType()))) {
     return emitOpError("expected to preserve the logical shape of the tensor");
+  }
+  // Verify that encoding_dims count matches the number of dynamic encoding
+  // dimensions expected by the encoding.
+  if (auto numDynamicDims = serializableAttr.getNumDynamicEncodingDims()) {
+    if (getEncodingDims().size() != *numDynamicDims) {
+      return emitOpError("expected ")
+             << *numDynamicDims << " encoding_dims for this encoding, but got "
+             << getEncodingDims().size();
+    }
   }
   return success();
 }
@@ -80,7 +91,9 @@ LogicalResult UnsetEncodingOp::verify() {
     return emitOpError(
         "result of unset_encoding op cannot have a tensor encoding");
   }
-  if (!isa_and_nonnull<SerializableAttr>(getSourceType().getEncoding())) {
+  auto serializableAttr =
+      dyn_cast_or_null<SerializableAttr>(getSourceType().getEncoding());
+  if (!serializableAttr) {
     return emitOpError(
         "source of unset_encoding op expected to have a valid tensor encoding");
   }
@@ -97,6 +110,15 @@ LogicalResult UnsetEncodingOp::verify() {
                          << " dynamic dimensions but only "
                          << getResultDims().size()
                          << " dimension values are attached";
+  }
+  // Verify that encoding_dims count matches the number of dynamic encoding
+  // dimensions expected by the encoding.
+  if (auto numDynamicDims = serializableAttr.getNumDynamicEncodingDims()) {
+    if (getEncodingDims().size() != *numDynamicDims) {
+      return emitOpError("expected ")
+             << *numDynamicDims << " encoding_dims for this encoding, but got "
+             << getEncodingDims().size();
+    }
   }
   return success();
 }
@@ -130,14 +152,15 @@ LogicalResult DimOp::verify() {
   }
 
   // Check that the index is valid if we can determine the number of dims.
-  std::optional<unsigned> numEncodingDims =
-      serializableAttr.getNumEncodingDims();
-  if (numEncodingDims) {
+  // Only dynamic dimensions are queryable via iree_encoding.dim.
+  std::optional<unsigned> numDynamicDims =
+      serializableAttr.getNumDynamicEncodingDims();
+  if (numDynamicDims) {
     int64_t index = getConstantIndex();
-    if (index < 0 || static_cast<unsigned>(index) >= *numEncodingDims) {
+    if (index < 0 || static_cast<unsigned>(index) >= *numDynamicDims) {
       return emitOpError("encoding dimension index ")
              << index << " is out of bounds for encoding with "
-             << *numEncodingDims << " dimensions";
+             << *numDynamicDims << " dynamic dimensions";
     }
   }
 

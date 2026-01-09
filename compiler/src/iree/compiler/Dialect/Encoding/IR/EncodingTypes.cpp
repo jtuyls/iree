@@ -51,8 +51,11 @@ static Type getContractionInputTypeWithSignedness(OpBuilder &builder,
   return elemType;
 }
 
-/// Extract M, N, K dimension values for a contraction operation.
-/// Returns a vector of [M, N, K] values as index SSA values.
+/// Extract only the dynamic dimension values (M, N, K) for a contraction.
+/// Returns values only for dimensions that are dynamic in iteration_sizes.
+/// The iteration_sizes array contains static dimensions or ShapedType::kDynamic
+/// for dynamic ones. This returns values in the order they appear in
+/// iteration_sizes, but only for the dynamic entries.
 static SmallVector<Value> getContractionDynamicDims(OpBuilder &builder,
                                                     linalg::LinalgOp linalgOp) {
   Location loc = linalgOp.getLoc();
@@ -62,6 +65,9 @@ static SmallVector<Value> getContractionDynamicDims(OpBuilder &builder,
   if (failed(cDims)) {
     return {};
   }
+
+  // Get static loop ranges to determine which dimensions are dynamic.
+  SmallVector<int64_t> iterationSizes = linalgOp.getStaticLoopRanges();
 
   // Get the output tensor to extract M and N from.
   Value output = linalgOp.getDpsInits()[0];
@@ -80,33 +86,38 @@ static SmallVector<Value> getContractionDynamicDims(OpBuilder &builder,
     return tensor::DimOp::create(builder, loc, tensor, *dimPos);
   };
 
-  // Get M dimension from output (first M dim, or 1 if empty).
-  Value mValue;
-  if (cDims->m.empty()) {
-    mValue = arith::ConstantIndexOp::create(builder, loc, 1);
-  } else {
-    mValue = getDimValue(output, outputMap, cDims->m[0]);
+  // For matmul, iteration_sizes is ordered as the loop dimensions appear in
+  // the indexing maps. We need to find M, N, K dimensions and check if they're
+  // dynamic.
+  SmallVector<Value> dynamicDims;
+
+  // Process M dimensions
+  for (unsigned mDim : cDims->m) {
+    if (mDim < iterationSizes.size() &&
+        ShapedType::isDynamic(iterationSizes[mDim])) {
+      dynamicDims.push_back(getDimValue(output, outputMap, mDim));
+    }
   }
 
-  // Get N dimension from output (first N dim, or 1 if empty).
-  Value nValue;
-  if (cDims->n.empty()) {
-    nValue = arith::ConstantIndexOp::create(builder, loc, 1);
-  } else {
-    nValue = getDimValue(output, outputMap, cDims->n[0]);
+  // Process N dimensions
+  for (unsigned nDim : cDims->n) {
+    if (nDim < iterationSizes.size() &&
+        ShapedType::isDynamic(iterationSizes[nDim])) {
+      dynamicDims.push_back(getDimValue(output, outputMap, nDim));
+    }
   }
 
-  // Get K dimension from LHS.
+  // Process K dimensions
   Value lhs = linalgOp.getDpsInputs()[0];
   AffineMap lhsMap = linalgOp.getIndexingMapsArray()[0];
-  Value kValue;
-  if (cDims->k.empty()) {
-    kValue = arith::ConstantIndexOp::create(builder, loc, 1);
-  } else {
-    kValue = getDimValue(lhs, lhsMap, cDims->k[0]);
+  for (unsigned kDim : cDims->k) {
+    if (kDim < iterationSizes.size() &&
+        ShapedType::isDynamic(iterationSizes[kDim])) {
+      dynamicDims.push_back(getDimValue(lhs, lhsMap, kDim));
+    }
   }
 
-  return {mValue, nValue, kValue};
+  return dynamicDims;
 }
 
 FailureOr<OpEncodingProperties>
