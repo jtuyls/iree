@@ -20,7 +20,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Dominance.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
@@ -36,172 +36,276 @@ namespace mlir::iree_compiler::DispatchCreation {
 
 namespace {
 
-/// Process a set_encoding op: create util.specialize ops for encoding dims
-/// that need specialization and update the set_encoding to use them.
-static void processSetEncodingOp(IREE::Encoding::SetEncodingOp setEncodingOp,
-                                 DenseMap<Value, Value> &specializeCache) {
-  auto resultType = setEncodingOp.getResultType();
-  auto encoding = resultType.getEncoding();
-  if (!encoding) {
+/// Extracts all unique DynamicLayoutSpecializerAttr from an operation's
+/// operands and results.
+static SmallVector<IREE::Encoding::DynamicLayoutSpecializerAttr>
+getSpecializerAttrs(Operation *op) {
+  DenseSet<Attribute> seen;
+  SmallVector<IREE::Encoding::DynamicLayoutSpecializerAttr> attrs;
+
+  auto addAttrFromType = [&](Type type) {
+    auto tensorType = dyn_cast<RankedTensorType>(type);
+    if (!tensorType || !tensorType.getEncoding()) {
+      return;
+    }
+    auto attr = dyn_cast<IREE::Encoding::DynamicLayoutSpecializerAttr>(
+        tensorType.getEncoding());
+    if (attr && attr.supportsSpecialization() && !seen.contains(attr)) {
+      attrs.push_back(attr);
+      seen.insert(attr);
+    }
+  };
+
+  // Check operands
+  for (Value operand : op->getOperands()) {
+    addAttrFromType(operand.getType());
+  }
+
+  // Check results
+  for (Value result : op->getResults()) {
+    addAttrFromType(result.getType());
+  }
+
+  return attrs;
+}
+
+/// Creates iree_encoding.dim ops for the dimensions that need specialization,
+/// wraps them with util.specialize ops.
+/// Returns the created specialize ops for post-reification processing.
+static void insertMarkersForOp(
+    Operation *op, OpBuilder &builder,
+    DenseSet<std::pair<Value, unsigned>> &seenKeys,
+    SmallVectorImpl<IREE::Util::SpecializeOp> &specializeOps) {
+  // Get all specializer attributes from this operation
+  auto specializerAttrs = getSpecializerAttrs(op);
+  if (specializerAttrs.empty()) {
     return;
   }
 
+  // For each specializer attribute, get the operands to specialize on
+  for (auto specializerAttr : specializerAttrs) {
+    auto specOperands = specializerAttr.getSpecializationOperands(op);
+    if (specOperands.empty()) {
+      continue;
+    }
+
+    LLVM_DEBUG(llvm::dbgs() << "Creating markers for op: " << *op << "\n");
+
+    // Set insertion point BEFORE the operation - specialize markers should
+    // precede the op that uses the specialized value
+    builder.setInsertionPoint(op);
+
+    for (const auto &specOp : specOperands) {
+      auto key = std::make_pair(specOp.operand, specOp.dimIndex);
+
+      // Check if we've already created markers for this (operand, dimIndex)
+      if (seenKeys.contains(key)) {
+        LLVM_DEBUG(llvm::dbgs() << "  Skipping duplicate for operand dim "
+                                << specOp.dimIndex << "\n");
+        continue;
+      }
+      seenKeys.insert(key);
+
+      // Create the iree_encoding.dim op to query this dimension
+      auto encodingDimOp = IREE::Encoding::DimOp::create(
+          builder, op->getLoc(), specOp.operand,
+          static_cast<int64_t>(specOp.dimIndex));
+
+      LLVM_DEBUG(llvm::dbgs() << "  Created encoding_dim for operand dim "
+                              << specOp.dimIndex << ": "
+                              << encodingDimOp.getResult() << "\n");
+
+      // Wrap with util.specialize to mark for specialization
+      auto specializeOp = IREE::Util::SpecializeOp::create(
+          builder, op->getLoc(), encodingDimOp.getResult());
+      specializeOps.push_back(specializeOp);
+
+      LLVM_DEBUG(llvm::dbgs() << "  Created util.specialize: "
+                              << specializeOp.getResult() << "\n");
+    }
+  }
+}
+
+/// Check if a value is a constant (e.g., from arith.constant).
+/// TODO(#...): This is a workaround. The encoding_dims on set_encoding/
+/// unset_encoding ops currently include both static and dynamic dimensions.
+/// We should update encoding_dims to only contain dynamic dimensions, which
+/// would eliminate the need for this constant check. Once that's done,
+/// this function and the filtering logic in insertMarkersForSetEncoding
+/// can be removed.
+static bool isConstantValue(Value value) {
+  if (!value.getDefiningOp()) {
+    return false;
+  }
+  return matchPattern(value, m_Constant());
+}
+
+/// Creates util.specialize ops for encoding_dims of set_encoding ops.
+/// This is a special case: we want to mark the encoding_dims for specialization
+/// even before they get consumed by the encoding operation.
+/// Only creates markers for dynamic (non-constant) dimensions.
+static void insertMarkersForSetEncoding(
+    IREE::Encoding::SetEncodingOp setEncodingOp, OpBuilder &builder,
+    DenseSet<std::pair<Value, unsigned>> &seenKeys,
+    SmallVectorImpl<IREE::Util::SpecializeOp> &specializeOps) {
+  // Check if this encoding supports specialization
+  auto resultType = setEncodingOp.getResultType();
   auto specializerAttr =
-      dyn_cast<IREE::Encoding::DynamicLayoutSpecializerAttr>(encoding);
+      dyn_cast_or_null<IREE::Encoding::DynamicLayoutSpecializerAttr>(
+          resultType.getEncoding());
   if (!specializerAttr || !specializerAttr.supportsSpecialization()) {
     return;
   }
 
-  ValueRange encodingDims = setEncodingOp.getEncodingDims();
+  // Get the encoding_dims values
+  auto encodingDims = setEncodingOp.getEncodingDims();
   if (encodingDims.empty()) {
     return;
   }
 
-  SmallVector<unsigned> specDimIndices =
-      specializerAttr.getSpecializationDimensions();
-  if (specDimIndices.empty()) {
-    for (unsigned i = 0; i < encodingDims.size(); ++i) {
-      specDimIndices.push_back(i);
-    }
-  }
+  LLVM_DEBUG(llvm::dbgs() << "Creating markers for set_encoding: "
+                          << *setEncodingOp << "\n");
 
-  OpBuilder builder(setEncodingOp);
-  SmallVector<Value> newEncodingDims(encodingDims.begin(), encodingDims.end());
-  bool modified = false;
+  // Set insertion point before the set_encoding
+  builder.setInsertionPoint(setEncodingOp);
 
-  for (unsigned dimIdx : specDimIndices) {
-    if (dimIdx >= encodingDims.size()) {
+  for (auto [idx, dim] : llvm::enumerate(encodingDims)) {
+    // Skip constant values - only specialize on dynamic dimensions.
+    // TODO: Remove this check once encoding_dims only contains dynamic dims.
+    if (isConstantValue(dim)) {
+      LLVM_DEBUG(llvm::dbgs() << "  Skipping constant encoding_dims[" << idx
+                              << "]\n");
       continue;
     }
 
-    Value dimValue = encodingDims[dimIdx];
+    auto key = std::make_pair(dim, static_cast<unsigned>(idx));
 
-    // Check if we've already created a specialize op for this value
-    Value specValue;
-    auto it = specializeCache.find(dimValue);
-    if (it != specializeCache.end()) {
-      specValue = it->second;
-    } else {
-      // Create the specialize op before the set_encoding
-      auto specOp = IREE::Util::SpecializeOp::create(builder,
-                                                      setEncodingOp.getLoc(),
-                                                      dimValue);
-      specValue = specOp.getResult();
-      specializeCache[dimValue] = specValue;
-
-      LLVM_DEBUG(llvm::dbgs() << "Created util.specialize: " << dimValue
-                              << " -> " << specValue << "\n");
+    // Check if we've already created markers for this (value, idx) pair
+    if (seenKeys.contains(key)) {
+      LLVM_DEBUG(llvm::dbgs() << "  Skipping duplicate for encoding_dims["
+                              << idx << "]\n");
+      continue;
     }
+    seenKeys.insert(key);
 
-    newEncodingDims[dimIdx] = specValue;
-    modified = true;
-  }
+    // Create util.specialize directly for the encoding_dims value
+    auto specializeOp =
+        IREE::Util::SpecializeOp::create(builder, setEncodingOp.getLoc(), dim);
+    specializeOps.push_back(specializeOp);
 
-  if (modified) {
-    setEncodingOp.getEncodingDimsMutable().assign(newEncodingDims);
-    LLVM_DEBUG(llvm::dbgs() << "Updated set_encoding: " << setEncodingOp
+    LLVM_DEBUG(llvm::dbgs() << "  Created util.specialize for encoding_dims["
+                            << idx << "]: " << specializeOp.getResult()
                             << "\n");
   }
 }
 
-/// Hoist util.specialize ops into dispatch regions.
-/// For each dispatch region:
-/// 1. Find values used in the region that come from util.specialize ops
-///    outside and create new specialize ops inside
-/// 2. Find values used in the region that are the INPUT to a util.specialize
-///    op outside (meaning they need specialization) and create specialize
-///    ops for them inside the dispatch
-static void hoistSpecializeOpsIntoDispatchRegions(
-    FunctionOpInterface funcOp,
-    const DenseMap<Value, Value> &specializeCache) {
-  funcOp.walk([&](IREE::Flow::DispatchRegionOp regionOp) {
-    Region &body = regionOp.getBody();
-    if (body.empty()) {
-      return;
-    }
+/// Check if `defOp` properly dominates `use` within the same region.
+/// This is a simplified dominance check that works for operations in the same
+/// block (defOp must come before use's owner) or different blocks within the
+/// same region (we use a conservative approach - only replace if in same block
+/// and defOp comes first).
+static bool properlyDominates(Operation *defOp, OpOperand *use) {
+  Operation *user = use->getOwner();
 
-    Block &entryBlock = body.front();
+  // If in different regions, the outer region's op dominates inner uses
+  if (defOp->getParentRegion() != user->getParentRegion()) {
+    return defOp->getParentRegion()->isAncestor(user->getParentRegion());
+  }
 
-    // First pass: collect all values that need specialization inside the
-    // dispatch. We collect them first to avoid modifying the IR while walking.
-    DenseSet<Value> valuesToSpecialize;
+  // Same region - check if same block
+  Block *defBlock = defOp->getBlock();
+  Block *userBlock = user->getBlock();
 
-    regionOp.walk([&](Operation *op) {
-      for (Value operand : op->getOperands()) {
-        // Skip values already marked
-        if (valuesToSpecialize.contains(operand)) {
-          continue;
-        }
+  if (defBlock != userBlock) {
+    // Different blocks in same region - for now, be conservative and don't
+    // replace. A proper implementation would use DominanceInfo.
+    return false;
+  }
 
-        // Skip values defined inside the region
-        if (operand.getDefiningOp() &&
-            operand.getDefiningOp()->getParentRegion() == &body) {
-          continue;
-        }
-
-        // Case 1: Check if this operand is defined by a util.specialize op
-        // outside the region - we'll create a new one inside
-        if (operand.getDefiningOp<IREE::Util::SpecializeOp>()) {
-          valuesToSpecialize.insert(operand);
-          continue;
-        }
-
-        // Case 2: Check if this operand is the INPUT to a util.specialize op
-        // (meaning it should be specialized when captured)
-        if (specializeCache.contains(operand)) {
-          valuesToSpecialize.insert(operand);
-        }
-      }
-    });
-
-    if (valuesToSpecialize.empty()) {
-      return;
-    }
-
-    // Second pass: create specialize ops at the beginning of the region
-    OpBuilder builder(&entryBlock, entryBlock.begin());
-    DenseMap<Value, Value> specValueMapping;
-
-    for (Value value : valuesToSpecialize) {
-      // Get the original (unspecialized) value to use as input
-      Value inputValue = value;
-      if (auto specOp = value.getDefiningOp<IREE::Util::SpecializeOp>()) {
-        inputValue = specOp.getOperand();
-      }
-
-      auto newSpecOp = IREE::Util::SpecializeOp::create(
-          builder, value.getLoc(), inputValue);
-      specValueMapping[value] = newSpecOp.getResult();
-
-      LLVM_DEBUG(llvm::dbgs()
-                 << "Created util.specialize inside dispatch: " << inputValue
-                 << " -> " << newSpecOp.getResult() << "\n");
-    }
-
-    // Third pass: replace uses of the outer values with the specialized ones
-    for (auto &[outerValue, innerValue] : specValueMapping) {
-      outerValue.replaceUsesWithIf(innerValue, [&](OpOperand &use) {
-        // Don't replace in the specialize op itself
-        if (use.getOwner() == innerValue.getDefiningOp()) {
-          return false;
-        }
-        return use.getOwner()->getParentRegion() == &body;
-      });
-    }
-  });
+  // Same block - defOp must come before user in the block
+  return defOp->isBeforeInBlock(user);
 }
 
-/// Remove util.specialize ops that have no uses (after hoisting into
-/// dispatches, the outer specialize ops may become unused).
-static void removeUnusedSpecializeOps(FunctionOpInterface funcOp) {
-  SmallVector<IREE::Util::SpecializeOp> opsToRemove;
-  funcOp.walk([&](IREE::Util::SpecializeOp specOp) {
-    if (specOp.getResult().use_empty()) {
-      opsToRemove.push_back(specOp);
+/// Get the nesting depth of a region (how many parent regions it has).
+static unsigned getRegionNestingDepth(Region *region) {
+  unsigned depth = 0;
+  while (region) {
+    ++depth;
+    Operation *parentOp = region->getParentOp();
+    region = parentOp ? parentOp->getParentRegion() : nullptr;
+  }
+  return depth;
+}
+
+/// After reification, the util.specialize ops now have their operands resolved
+/// to the actual values (e.g., encoding_dims values). Replace uses of those
+/// values that are dominated by the specialize op with the specialize results.
+static void replaceUsesWithSpecializeResults(
+    ArrayRef<IREE::Util::SpecializeOp> specializeOps) {
+  // Map from (value, region) to their specialize ops
+  // We need region-aware deduplication since the same value might need
+  // different specialize ops in different dispatch regions
+  DenseMap<std::pair<Value, Region *>, IREE::Util::SpecializeOp>
+      valueToSpecialize;
+
+  for (auto specOp : specializeOps) {
+    Value operand = specOp.getOperand();
+    Region *region = specOp->getParentRegion();
+    auto key = std::make_pair(operand, region);
+
+    // If we already have a specialize for this value in this region,
+    // use that one and mark this one for removal
+    auto it = valueToSpecialize.find(key);
+    if (it != valueToSpecialize.end()) {
+      // Replace uses of this specialize result with the earlier one
+      specOp.getResult().replaceAllUsesWith(it->second.getResult());
+      specOp.erase();
+      continue;
     }
+
+    valueToSpecialize[key] = specOp;
+  }
+
+  // Sort by region nesting depth (deepest first) to process inner specialize
+  // ops before outer ones. This ensures that inner uses get replaced by inner
+  // specialize results before the outer specialize can replace them.
+  SmallVector<std::pair<std::pair<Value, Region *>, IREE::Util::SpecializeOp>>
+      sortedEntries(valueToSpecialize.begin(), valueToSpecialize.end());
+  llvm::sort(sortedEntries, [](const auto &a, const auto &b) {
+    return getRegionNestingDepth(a.first.second) >
+           getRegionNestingDepth(b.first.second);
   });
-  for (auto op : opsToRemove) {
-    op.erase();
+
+  // Now replace uses of the original values with the specialize results
+  // Only replace uses that are dominated by the specialize op
+  // Process from innermost to outermost regions so inner specialize ops
+  // get their uses replaced before outer ones can interfere.
+  for (auto &[key, specOp] : sortedEntries) {
+    Value value = key.first;
+
+    LLVM_DEBUG(llvm::dbgs() << "Processing specialize for value " << value
+                            << " in region\n");
+
+    // Collect uses to replace (can't modify while iterating)
+    SmallVector<OpOperand *> usesToReplace;
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      // Skip the specialize op itself
+      if (user == specOp.getOperation()) {
+        continue;
+      }
+      // Only replace uses that are properly dominated by the specialize op
+      if (properlyDominates(specOp.getOperation(), &use)) {
+        usesToReplace.push_back(&use);
+      }
+    }
+
+    // Replace the collected uses
+    for (OpOperand *use : usesToReplace) {
+      use->set(specOp.getResult());
+      LLVM_DEBUG(llvm::dbgs() << "  Replaced use in: " << *use->getOwner()
+                              << "\n");
+    }
   }
 }
 
@@ -210,34 +314,55 @@ struct InsertEncodingSpecializationMarkersPass
           InsertEncodingSpecializationMarkersPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
+    MLIRContext *context = &getContext();
+    OpBuilder builder(context);
 
-    // Track values we've already specialized to avoid duplicates
-    DenseMap<Value, Value> specializeCache;
+    // Track which (operand, dimIndex) pairs we've already processed
+    DenseSet<std::pair<Value, unsigned>> seenKeys;
+    // Collect all created specialize ops
+    SmallVector<IREE::Util::SpecializeOp> specializeOps;
 
-    // Collect set_encoding ops first to avoid iterator invalidation
-    SmallVector<IREE::Encoding::SetEncodingOp> setEncodingOps;
-    funcOp.walk([&](IREE::Encoding::SetEncodingOp op) {
-      setEncodingOps.push_back(op);
+    // First, handle set_encoding ops - insert specialize markers for their
+    // encoding_dims before any other processing
+    funcOp.walk([&](IREE::Encoding::SetEncodingOp setEncodingOp) {
+      insertMarkersForSetEncoding(setEncodingOp, builder, seenKeys,
+                                  specializeOps);
     });
 
-    if (setEncodingOps.empty()) {
-      LLVM_DEBUG(llvm::dbgs() << "No set_encoding ops found\n");
+    // Walk all dispatch regions and create dim + specialize ops for ops
+    // that use encoded tensors
+    funcOp.walk([&](IREE::Flow::DispatchRegionOp regionOp) {
+      regionOp.walk([&](Operation *op) {
+        // Skip the dispatch region op itself and flow.return
+        if (op == regionOp.getOperation() || isa<IREE::Flow::ReturnOp>(op)) {
+          return;
+        }
+
+        insertMarkersForOp(op, builder, seenKeys, specializeOps);
+      });
+    });
+
+    // If no markers were created, nothing to do
+    if (specializeOps.empty()) {
       return;
     }
 
-    LLVM_DEBUG(llvm::dbgs() << "Processing " << setEncodingOps.size()
-                            << " set_encoding ops\n");
+    // Apply reification patterns to fold encoding_dim ops at function level.
+    // This traces iree_encoding.dim ops back through the producer chain
+    // to resolve them to actual values (e.g., encoding_dims from set_encoding).
+    // The util.specialize ops will have their operands updated to the resolved
+    // values.
+    RewritePatternSet patterns(context);
+    IREE::Encoding::populateDimReificationPatterns(patterns);
 
-    // First pass: create specialize ops and update set_encoding ops
-    for (auto setEncodingOp : setEncodingOps) {
-      processSetEncodingOp(setEncodingOp, specializeCache);
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+      return signalPassFailure();
     }
 
-    // Second pass: hoist specialize ops into dispatch regions
-    hoistSpecializeOpsIntoDispatchRegions(funcOp, specializeCache);
-
-    // Third pass: remove unused specialize ops
-    removeUnusedSpecializeOps(funcOp);
+    // After reification, replace uses of the resolved values with the
+    // specialize results. This ensures downstream passes see the specialized
+    // values.
+    replaceUsesWithSpecializeResults(specializeOps);
   }
 };
 

@@ -512,7 +512,7 @@ def Util_AssumeIntOp : Util_PureOp<"assume.int", [
   let hasVerifier = 1;
 }
 
-def Util_SpecializeOp : Util_PureOp<"specialize", [
+def Util_SpecializeOp : Util_Op<"specialize", [
     AllTypesMatch<["operand", "result"]>
 ]> {
   let summary = [{Marks a value for specialization.}];
@@ -528,9 +528,9 @@ def Util_SpecializeOp : Util_PureOp<"specialize", [
     generation, allowing `SpecializeExports` to find the workload ordinal
     for condition generation.
 
-    This is a Pure op - unused specialize ops will be DCE'd. Specialize ops
-    that are used (e.g., in set_encoding's encoding_dims) will be preserved
-    and eventually consumed by SpecializeExports.
+    This op is NOT Pure - it will survive DCE even if its result is unused.
+    This is important because the op serves as a marker for downstream passes
+    (like SpecializeExports) to identify values that need specialization.
 
     Example:
     ```mlir

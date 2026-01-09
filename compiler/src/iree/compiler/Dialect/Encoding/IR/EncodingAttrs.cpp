@@ -590,26 +590,29 @@ EncodingAttr::getSpecializationOperands(Operation *op) const {
   }
 
   // For EncodingAttr, we specialize on dynamic encoding dimensions of
-  // any result that has this encoding.
-  for (OpResult opResult : op->getResults()) {
-    auto resultType = dyn_cast<RankedTensorType>(opResult.getType());
-    if (!resultType || !resultType.getEncoding())
+  // any operand (input) that has this encoding. Using operands allows the
+  // dim op to trace back through the producer chain to set_encoding's
+  // encoding_dims or tensor.empty's dynamic sizes.
+  for (OpOperand &operand : op->getOpOperands()) {
+    auto operandType = dyn_cast<RankedTensorType>(operand.get().getType());
+    if (!operandType || !operandType.getEncoding())
       continue;
 
-    auto resultEncoding = dyn_cast<EncodingAttr>(resultType.getEncoding());
-    if (!resultEncoding)
+    auto operandEncoding = dyn_cast<EncodingAttr>(operandType.getEncoding());
+    if (!operandEncoding)
       continue;
 
-    // Check if this result's encoding matches the specializable encoding
+    // Check if this operand's encoding matches the specializable encoding
     // we're looking for (same iteration_sizes, op_type, etc.)
-    if (resultEncoding.getOpType() != getOpType() ||
-        resultEncoding.getIterationSizes() != getIterationSizes())
+    if (operandEncoding.getOpType() != getOpType() ||
+        operandEncoding.getIterationSizes() != getIterationSizes())
       continue;
 
     // Add specialization markers for each dynamic encoding dimension.
-    auto dynamicDims = getDynamicDimensionIndices(resultEncoding.getIterationSizes());
+    auto dynamicDims =
+        getDynamicDimensionIndices(operandEncoding.getIterationSizes());
     for (unsigned dimIdx : dynamicDims) {
-      result.push_back({opResult, dimIdx});
+      result.push_back({operand.get(), dimIdx});
     }
   }
 
@@ -989,28 +992,33 @@ DynamicLayoutTestAttr::getSpecializationDimensions() const {
 
 llvm::SmallVector<SpecializationOperand>
 DynamicLayoutTestAttr::getSpecializationOperands(Operation *op) const {
-  llvm::SmallVector<SpecializationOperand> operands;
-  
+  llvm::SmallVector<SpecializationOperand> result;
+
   if (!supportsSpecialization()) {
-    return operands;
+    return result;
   }
 
-  // For the test attribute, we specialize on all encoding dimensions of
-  // any result that has this encoding.
-  for (OpResult result : op->getResults()) {
-    auto resultType = dyn_cast<RankedTensorType>(result.getType());
-    if (!resultType || resultType.getEncoding() != *this) {
+  // For the test attribute, we specialize on encoding dimensions of
+  // operands that have this encoding. Using operands (not results) allows
+  // the iree_encoding.dim ops to be reified back to the encoding_dims
+  // of the set_encoding op.
+  for (Value operand : op->getOperands()) {
+    auto operandType = dyn_cast<RankedTensorType>(operand.getType());
+    if (!operandType || operandType.getEncoding() != *this) {
       continue;
     }
 
     // Add a specialization operand for each encoding dimension.
     unsigned numDims = getNumDims();
     for (unsigned dimIdx = 0; dimIdx < numDims; ++dimIdx) {
-      operands.push_back({result, dimIdx});
+      result.push_back({operand, dimIdx});
     }
+    // Only use the first matching operand to avoid duplicates
+    // (e.g., for binary ops where both operands have the same encoding)
+    break;
   }
-  
-  return operands;
+
+  return result;
 }
 
 } // namespace mlir::iree_compiler::IREE::Encoding
