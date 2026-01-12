@@ -451,8 +451,8 @@ static std::string summarizeDispatchRegion(Region &region) {
         auto opName = getOpNameWithoutDialectName(op);
         auto encoding = cast<IREE::Encoding::EncodingAttr>(
             op.getResultType().getEncoding());
-        auto index =
-            IREE::Encoding::stringifyOperandIndex(encoding.getOperandIndex());
+        auto index = IREE::Encoding::stringifyOperandIndex(
+            encoding.getOperandIndex(), encoding.getOpType().getValue());
         ArrayRef<int64_t> shape = op.getSourceType().getShape();
         bestSummary = opName + "_" + index + "_" + loopRangesToString(shape);
         ;
@@ -461,8 +461,8 @@ static std::string summarizeDispatchRegion(Region &region) {
         auto opName = getOpNameWithoutDialectName(op);
         auto encoding = cast<IREE::Encoding::EncodingAttr>(
             op.getSourceType().getEncoding());
-        auto index =
-            IREE::Encoding::stringifyOperandIndex(encoding.getOperandIndex());
+        auto index = IREE::Encoding::stringifyOperandIndex(
+            encoding.getOperandIndex(), encoding.getOpType().getValue());
         ArrayRef<int64_t> shape = op.getResultType().getShape();
         bestSummary = opName + "_" + index + "_" + loopRangesToString(shape);
       })

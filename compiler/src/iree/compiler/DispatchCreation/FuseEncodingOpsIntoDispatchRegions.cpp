@@ -9,6 +9,7 @@
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/DispatchCreation/FusionUtils.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -75,18 +76,14 @@ struct FuseEncodingOpsIntoDispatchRegionsPass final
       }
     });
 
+    // First pass: try to fuse set_encoding ops with producer dispatches.
     for (IREE::Encoding::SetEncodingOp encodingOp : encodingOps) {
       OpOperand &operand = encodingOp.getSourceMutable();
-      std::optional<std::pair<OpResult, SmallVector<Operation *>>>
-          producerChain = getProducerDispatchValueAndOpChain(
-              operand.get(), enableAggressiveFusion);
-      // Nothing to fuse with, so wrap the `encodingOp` in its own dispatch.
+      auto producerChain = getProducerDispatchValueAndOpChain(
+          operand.get(), enableAggressiveFusion);
       if (!producerChain) {
         continue;
       }
-
-      // Find producer operation inside of the dispatch region to determine if
-      // fusion is possible.
       OpResult result = producerChain->first;
       auto producerDispatch =
           result.getDefiningOp<IREE::Flow::DispatchRegionOp>();
@@ -94,12 +91,8 @@ struct FuseEncodingOpsIntoDispatchRegionsPass final
           producerDispatch.getBody().front().getTerminator());
       auto producerInRegion = dyn_cast<OpResult>(
           dispatchReturnOp->getOperand(result.getResultNumber()));
-      if (!producerInRegion) {
-        continue;
-      }
-
-      // Place the op in its own dispatch region if fusion is not possible.
-      if (!isFusableWithSetEncoding(producerInRegion.getOwner())) {
+      if (!producerInRegion ||
+          !isFusableWithSetEncoding(producerInRegion.getOwner())) {
         continue;
       }
       // Fuse the `encodingOp` and the producer chain into the dispatch.
@@ -114,6 +107,21 @@ struct FuseEncodingOpsIntoDispatchRegionsPass final
           return signalPassFailure();
         }
         producerDispatch = fusedDispatch.value();
+      }
+    }
+
+    // Second pass: wrap any remaining encoding ops in their own dispatches.
+    SmallVector<Operation *> remainingEncodingOps;
+    funcOp->walk([&](Operation *op) {
+      if (isa<IREE::Encoding::SetEncodingOp, IREE::Encoding::UnsetEncodingOp>(
+              op) &&
+          IREE::Flow::isNonNullAndOutsideDispatch(op)) {
+        remainingEncodingOps.push_back(op);
+      }
+    });
+    for (Operation *op : remainingEncodingOps) {
+      if (failed(IREE::Flow::wrapOpInDispatchRegion(rewriter, op))) {
+        return signalPassFailure();
       }
     }
 

@@ -214,21 +214,6 @@ def MaterializeCopyOnWritePass :
   ];
 }
 
-def MaterializeEncodingsPass :
-    Pass<"iree-stream-materialize-encodings", "mlir::ModuleOp"> {
-  let summary = "Materialize stream.tensor.encode ops to dispatches and executables.";
-  let description = [{
-    Materializes uniqued executables for `stream.tensor.encode` ops and replaces
-    them with dispatches to those executables.
-  }];
-  let dependentDialects = [
-    "mlir::func::FuncDialect",
-    "IREE::Encoding::IREEEncodingDialect",
-    "IREE::Stream::StreamDialect",
-    "IREE::TensorExt::IREETensorExtDialect",
-  ];
-}
-
 def CloneToConsumersPass :
     Pass<"iree-stream-clone-to-consumers", "mlir::ModuleOp"> {
   let summary = "Clones operations that opt-in to consumer affinities.";

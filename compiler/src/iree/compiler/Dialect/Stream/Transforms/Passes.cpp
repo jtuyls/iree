@@ -190,7 +190,6 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
       .addPass(IREE::Stream::createEncodeHostTensorsPass);
   passManager.addNestedPass<IREE::Stream::ExecutableOp>(
       IREE::Stream::createEncodeDeviceTensorsPass());
-  passManager.addPass(IREE::Stream::createMaterializeEncodingsPass());
 
   // Layout packed slices (if any exist yet) to emit the arithmetic required for
   // all resource offsets. We introduce more packing ops later on but do want

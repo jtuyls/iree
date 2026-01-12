@@ -33,8 +33,12 @@ const int64_t SCALED_MATMUL_LHS_SCALES = 2;
 const int64_t SCALED_MATMUL_RHS_SCALES = 3;
 const int64_t SCALED_MATMUL_RESULT = 4;
 
+// Forward declaration for enum (defined in EncodingEnums.h.inc)
+enum class EncodingOpType : uint32_t;
+
 /// Convert operand index to strings for printing
-std::string stringifyOperandIndex(IntegerAttr);
+std::string stringifyOperandIndex(IntegerAttr operandIndex,
+                                  EncodingOpType opType);
 
 /// Designates a dimension in a matmul (either the M or the N dimension) as
 /// being "narrow", i.e. small enough that we bother lowering the amount of

@@ -150,8 +150,27 @@ SerializableAttr::getEncodingProperties(Operation *op) {
   return failure();
 }
 
-std::string stringifyOperandIndex(IntegerAttr valueAttr) {
+std::string stringifyOperandIndex(IntegerAttr valueAttr,
+                                  EncodingOpType opType) {
   uint64_t value = valueAttr.getValue().getZExtValue();
+  if (opType == EncodingOpType::scaled_matmul) {
+    switch (value) {
+    case SCALED_MATMUL_LHS:
+      return "LHS";
+    case SCALED_MATMUL_RHS:
+      return "RHS";
+    case SCALED_MATMUL_LHS_SCALES:
+      return "LHS_SCALES";
+    case SCALED_MATMUL_RHS_SCALES:
+      return "RHS_SCALES";
+    case SCALED_MATMUL_RESULT:
+      return "RESULT";
+    default:
+      assert(false && "invalid scaled matmul operand index");
+      return "";
+    }
+  }
+  // Regular matmul and other op types
   switch (value) {
   case MATMUL_LHS:
     return "LHS";
@@ -160,7 +179,7 @@ std::string stringifyOperandIndex(IntegerAttr valueAttr) {
   case MATMUL_RESULT:
     return "RESULT";
   default:
-    assert(false && "invalid index");
+    assert(false && "invalid operand index");
     return "";
   }
 }

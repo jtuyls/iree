@@ -120,5 +120,6 @@ util.func public @foo(%arg0: tensor<255x513xf32>) -> tensor<255x1023xf32> {
 // CHECK:      util.global private @[[HOISTED:.+]] : tensor<513x1023xf32, #[[RHS_ENCODING]]>
 // CHECK:      util.initializer {
 // CHECK:        %[[CST:.+]] = arith.constant dense<1.000000e+00> : tensor<513x1023xf32>
-// CHECK:        %[[ENCODED_CST:.+]] = flow.tensor.encode %[[CST]] : tensor<513x1023xf32> -> tensor<513x1023xf32, #[[RHS_ENCODING]]>
+// CHECK:        %[[ENCODED_CST:.+]] = flow.dispatch.workgroups
+// CHECK:          iree_encoding.set_encoding
 // CHECK:        util.global.store %[[ENCODED_CST]], @[[HOISTED]]
