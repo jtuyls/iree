@@ -1,0 +1,47 @@
+pull_request_rules:
+  # Standard backport rule
+  # TODO: Change back to "merged" condition for production use
+  # Currently using label-only trigger for testing
+  - name: backport to release branches
+    conditions:
+      # - merged  # TODO: Uncomment for production
+      - label~=^backport:(.+)$
+    actions:
+      backport:
+        branches:
+          - "{{ label | regex_search('backport:(.+)', '\\1') }}"
+        labels:
+          - backported
+        # When conflicts occur, Mergify will label the issue/PR
+        # We'll use this to trigger the AI resolver
+
+  # Label conflicting backport PRs for AI resolution
+  - name: label backport conflicts for AI
+    conditions:
+      - author=mergify[bot]
+      - title~=^\[Backport
+      - conflict
+    actions:
+      label:
+        add:
+          - backport-conflict
+          - needs-ai-resolution
+      comment:
+        message: |
+          ⚠️ This backport has merge conflicts.
+          
+          🤖 AI bot will attempt to resolve them automatically...
+
+  # Auto-merge resolved backports
+  - name: auto-merge resolved backports
+    conditions:
+      - author=mergify[bot]
+      - title~=^\[Backport
+      - -conflict
+      - check-success=build
+      - check-success=test
+      - "#approved-reviews-by>=1"
+    actions:
+      merge:
+        method: squash
+

@@ -1,0 +1,289 @@
+name: Resolve Backport Conflicts
+
+on:
+  # Trigger when Mergify labels a PR with conflicts
+  pull_request:
+    types: [labeled, opened, synchronize]
+  
+  # Also allow manual trigger via comment
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  resolve-conflicts:
+    # Trigger on 'needs-ai-resolution' label or '/resolve-conflicts' comment
+    if: |
+      (github.event_name == 'pull_request' &&
+        github.event.label.name == 'needs-ai-resolution') ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/resolve-conflicts'))
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Get PR info
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" == "issue_comment" ]; then
+            PR_NUMBER=${{ github.event.issue.number }}
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+          fi
+          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          
+          # Get PR details
+          gh pr view $PR_NUMBER --json headRefName,baseRefName,title,body > pr_info.json
+          
+          HEAD_BRANCH=$(jq -r '.headRefName' pr_info.json)
+          BASE_BRANCH=$(jq -r '.baseRefName' pr_info.json)
+          
+          echo "head_branch=$HEAD_BRANCH" >> $GITHUB_OUTPUT
+          echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
+          
+          # Extract original PR number from backport title like "[Backport release-1.0] Fix bug #123"
+          TITLE=$(jq -r '.title' pr_info.json)
+          ORIGINAL_PR=$(echo "$TITLE" | grep -oP '#\d+' | head -1 | tr -d '#')
+          echo "original_pr=$ORIGINAL_PR" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ steps.pr.outputs.head_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install anthropic
+
+      - name: Attempt merge and identify conflicts
+        id: conflicts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Fetch all branches
+          git fetch origin ${{ steps.pr.outputs.base_branch }}
+          
+          # Try to merge and capture conflicts
+          if git merge origin/${{ steps.pr.outputs.base_branch }} --no-commit --no-ff 2>/dev/null; then
+            echo "No conflicts detected"
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+            git merge --abort 2>/dev/null || true
+          else
+            echo "Conflicts detected"
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+            
+            # Get list of conflicting files
+            git diff --name-only --diff-filter=U > conflicting_files.txt
+            cat conflicting_files.txt
+          fi
+
+      - name: Resolve conflicts with AI
+        if: steps.conflicts.outputs.has_conflicts == 'true'
+        run: |
+          python << 'EOF'
+          import anthropic
+          import subprocess
+          import os
+          import json
+
+          client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+
+          # Read conflicting files
+          with open('conflicting_files.txt') as f:
+              conflicting_files = [line.strip() for line in f if line.strip()]
+
+          print(f"Resolving conflicts in {len(conflicting_files)} files...")
+
+          base_branch = os.environ['BASE_BRANCH']
+          head_branch = os.environ['HEAD_BRANCH']
+          original_pr = os.environ.get('ORIGINAL_PR', '')
+
+          for filepath in conflicting_files:
+              print(f"\n{'='*60}")
+              print(f"Processing: {filepath}")
+              print('='*60)
+              
+              # Read the conflicted file content
+              with open(filepath, 'r') as f:
+                  conflicted_content = f.read()
+              
+              # Get the original version from base branch (release branch)
+              try:
+                  base_content = subprocess.check_output(
+                      ['git', 'show', f'origin/{base_branch}:{filepath}'],
+                      text=True
+                  )
+              except:
+                  base_content = "(file does not exist in base branch)"
+              
+              # Get the incoming version from HEAD (backport branch)
+              try:
+                  head_content = subprocess.check_output(
+                      ['git', 'show', f'HEAD:{filepath}'],
+                      text=True
+                  )
+              except:
+                  head_content = "(file does not exist in head branch)"
+
+              # Get the original change from main (if we can find the original PR)
+              original_diff = ""
+              if original_pr:
+                  try:
+                      original_diff = subprocess.check_output(
+                          ['gh', 'pr', 'diff', original_pr, '--patch'],
+                          text=True,
+                          env={**os.environ, 'GH_TOKEN': os.environ['GITHUB_TOKEN']}
+                      )
+                      # Filter to just this file
+                      in_file = False
+                      filtered_diff = []
+                      for line in original_diff.split('\n'):
+                          if line.startswith('diff --git'):
+                              in_file = filepath in line
+                          if in_file:
+                              filtered_diff.append(line)
+                      original_diff = '\n'.join(filtered_diff)
+                  except Exception as e:
+                      print(f"Could not get original diff: {e}")
+
+              # Ask AI to resolve
+              prompt = f"""You are resolving a git merge conflict in a backport PR.
+
+          **Context:**
+          - We are backporting changes from `main` to `{base_branch}`
+          - The file `{filepath}` has conflicts
+
+          **The conflicted file (with conflict markers):**
+          ```
+          {conflicted_content}
+          ```
+
+          **The current version in {base_branch} (target branch):**
+          ```
+          {base_content[:5000]}
+          ```
+
+          **The version we're trying to backport:**
+          ```
+          {head_content[:5000]}
+          ```
+
+          {"**Original change from main:**" + chr(10) + "```" + chr(10) + original_diff[:3000] + chr(10) + "```" if original_diff else ""}
+
+          **Your task:**
+          Resolve the conflict by producing the final merged file content. 
+
+          Rules:
+          1. Include the intended changes from the backport
+          2. Preserve any necessary differences in the release branch
+          3. Remove ALL conflict markers (<<<<<<, =======, >>>>>>>)
+          4. The result must be valid, compilable code
+          5. When in doubt, prefer the backported changes but adapt them to the release branch's code structure
+
+          Return ONLY the resolved file content, no explanations or markdown code blocks.
+          """
+
+              response = client.messages.create(
+                  model="claude-sonnet-4-20250514",
+                  max_tokens=8000,
+                  messages=[{"role": "user", "content": prompt}]
+              )
+
+              resolved_content = response.content[0].text
+              
+              # Clean up any accidental markdown code blocks
+              if resolved_content.startswith("```"):
+                  lines = resolved_content.split('\n')
+                  # Remove first line (```) and last line (```)
+                  resolved_content = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
+
+              # Write the resolved content
+              with open(filepath, 'w') as f:
+                  f.write(resolved_content)
+              
+              # Stage the resolved file
+              subprocess.run(['git', 'add', filepath], check=True)
+              
+              print(f"✅ Resolved: {filepath}")
+
+          print("\n" + "="*60)
+          print("All conflicts resolved!")
+          print("="*60)
+          EOF
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+          ORIGINAL_PR: ${{ steps.pr.outputs.original_pr }}
+
+      - name: Commit and push resolution
+        if: steps.conflicts.outputs.has_conflicts == 'true'
+        run: |
+          # Complete the merge
+          git commit -m "AI-resolved merge conflicts for backport
+
+          Conflicts resolved by AI bot in:
+          $(cat conflicting_files.txt | sed 's/^/- /')"
+          
+          # Push the changes
+          git push origin ${{ steps.pr.outputs.head_branch }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PR
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          
+          if [ "${{ steps.conflicts.outputs.has_conflicts }}" == "true" ]; then
+            # Remove the conflict label, add resolved label
+            gh pr edit $PR_NUMBER --remove-label "needs-ai-resolution,backport-conflict" --add-label "ai-conflict-resolved"
+            
+            gh pr comment $PR_NUMBER --body "🤖 **AI Conflict Resolution Complete**
+            
+          The following files had conflicts that were automatically resolved:
+          $(cat conflicting_files.txt | sed 's/^/- \`/' | sed 's/$/\`/')
+          
+          ⚠️ **Please review the resolved conflicts carefully before approving.**
+          
+          The AI attempted to:
+          1. Apply the intended backported changes
+          2. Adapt them to the release branch's code structure
+          3. Preserve release-branch-specific code where appropriate"
+          else
+            gh pr comment $PR_NUMBER --body "✅ No conflicts detected - the PR is ready for review!"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Handle resolution failure
+        if: failure()
+        run: |
+          gh pr comment ${{ steps.pr.outputs.number }} --body "❌ **AI Conflict Resolution Failed**
+          
+          The AI bot was unable to automatically resolve the conflicts.
+          
+          Manual intervention is required. Please:
+          1. Check out the branch locally
+          2. Resolve conflicts manually
+          3. Push the resolution
+          
+          Or comment \`/resolve-conflicts\` to retry."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+
