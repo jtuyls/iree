@@ -28,7 +28,7 @@ pull_request_rules:
   - name: label backport conflicts for AI
     conditions:
       - author=mergify[bot]
-      - "title~=\\[Backport"
+      - "title~=\\(backport"
       - conflict
     actions:
       label:
@@ -45,7 +45,7 @@ pull_request_rules:
   - name: auto-merge resolved backports
     conditions:
       - author=mergify[bot]
-      - "title~=\\[Backport"
+      - "title~=\\(backport"
       - -conflict
       - check-success=build
       - check-success=test
