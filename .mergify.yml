@@ -2,7 +2,7 @@ pull_request_rules:
   # Test rule - add comment when label is added
   - name: debug backport label
     conditions:
-      - label~=^backport:
+      - "label~=backport:"
     actions:
       comment:
         message: |
@@ -30,7 +30,7 @@ pull_request_rules:
   - name: label backport conflicts for AI
     conditions:
       - author=mergify[bot]
-      - title~=^\[Backport
+      - "title~=\\[Backport"
       - conflict
     actions:
       label:
@@ -47,7 +47,7 @@ pull_request_rules:
   - name: auto-merge resolved backports
     conditions:
       - author=mergify[bot]
-      - title~=^\[Backport
+      - "title~=\\[Backport"
       - -conflict
       - check-success=build
       - check-success=test
