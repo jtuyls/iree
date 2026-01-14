@@ -90,9 +90,6 @@ jobs:
       - name: Resolve conflicts with AI
         if: steps.conflicts.outputs.has_conflicts == 'true'
         run: |
-          # Copy the resolution script from base branch (we're on PR branch which doesn't have it)
-          mkdir -p .github/scripts
-          git show origin/${{ steps.pr.outputs.base_branch }}:.github/scripts/resolve_conflicts.py > .github/scripts/resolve_conflicts.py
           chmod +x .github/scripts/resolve_conflicts.py
           python3 .github/scripts/resolve_conflicts.py conflicting_files.txt
         env:
