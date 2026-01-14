@@ -1,15 +1,26 @@
 pull_request_rules:
+  # Test rule - add comment when label is added
+  - name: debug backport label
+    conditions:
+      - label~=^backport:
+    actions:
+      comment:
+        message: |
+          🔍 Mergify detected backport label!
+          Labels: {{ label }}
+          Will attempt to backport...
+
   # Standard backport rule
   # TODO: Change back to "merged" condition for production use
   # Currently using label-only trigger for testing
   - name: backport to release branches
     conditions:
       # - merged  # TODO: Uncomment for production
-      - label~=^backport:(.+)$
+      - label=backport:backport-bot-release
     actions:
       backport:
         branches:
-          - "{{ label | regex_search('backport:(.+)') | last }}"
+          - backport-bot-release
         labels:
           - backported
         # When conflicts occur, Mergify will label the issue/PR
