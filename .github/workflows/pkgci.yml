@@ -9,6 +9,9 @@ name: PkgCI
 on:
   workflow_dispatch:
   pull_request:
+    branches-ignore:
+      - 'backport-bot'
+      - 'backport-bot-release'
   push:
     branches:
       - main

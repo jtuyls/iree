@@ -6,7 +6,11 @@
 
 name: Lint
 
-on: [pull_request]
+on:
+  pull_request:
+    branches-ignore:
+      - 'backport-bot'
+      - 'backport-bot-release'
 
 permissions:
   contents: read
