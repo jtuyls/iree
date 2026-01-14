@@ -108,6 +108,22 @@ jobs:
           head_branch = os.environ['HEAD_BRANCH']
           original_pr = os.environ.get('ORIGINAL_PR', '')
 
+          import re
+          
+          def extract_conflicts(content):
+              """Extract all conflict regions from content"""
+              pattern = r'(<<<<<<< HEAD\n)(.*?)(=======\n)(.*?)(>>>>>>> .*?\n)'
+              conflicts = []
+              for match in re.finditer(pattern, content, re.DOTALL):
+                  conflicts.append({
+                      'full_match': match.group(0),
+                      'head_version': match.group(2),
+                      'incoming_version': match.group(4),
+                      'start': match.start(),
+                      'end': match.end()
+                  })
+              return conflicts
+
           for filepath in conflicting_files:
               print(f"\n{'='*60}")
               print(f"Processing: {filepath}")
@@ -117,119 +133,78 @@ jobs:
               with open(filepath, 'r') as f:
                   conflicted_content = f.read()
               
-              # Get the original version from base branch (release branch)
-              try:
-                  base_content = subprocess.check_output(
-                      ['git', 'show', f'origin/{base_branch}:{filepath}'],
-                      text=True
-                  )
-              except:
-                  base_content = "(file does not exist in base branch)"
+              # Extract conflict regions
+              conflicts = extract_conflicts(conflicted_content)
+              print(f"Found {len(conflicts)} conflict region(s) in file")
               
-              # Get the incoming version from HEAD (backport branch)
-              try:
-                  head_content = subprocess.check_output(
-                      ['git', 'show', f'HEAD:{filepath}'],
-                      text=True
-                  )
-              except:
-                  head_content = "(file does not exist in head branch)"
-
-              # Get the original change from main (if we can find the original PR)
-              original_diff = ""
-              if original_pr:
-                  try:
-                      repo = os.environ.get('GITHUB_REPOSITORY', '')
-                      original_diff = subprocess.check_output(
-                          ['gh', 'pr', 'diff', original_pr, '--repo', repo, '--patch'],
-                          text=True,
-                          env={**os.environ, 'GH_TOKEN': os.environ['GITHUB_TOKEN']}
-                      )
-                      # Filter to just this file
-                      in_file = False
-                      filtered_diff = []
-                      for line in original_diff.split('\n'):
-                          if line.startswith('diff --git'):
-                              in_file = filepath in line
-                          if in_file:
-                              filtered_diff.append(line)
-                      original_diff = '\n'.join(filtered_diff)
-                  except Exception as e:
-                      print(f"Could not get original diff: {e}")
-
-              # Ask AI to resolve
-              prompt = f"""You are resolving a git merge conflict in a backport PR.
+              # Resolve each conflict region individually
+              resolved_content = conflicted_content
+              
+              for i, conflict in enumerate(conflicts):
+                  print(f"\n  Conflict {i+1}/{len(conflicts)}:")
+                  print(f"    HEAD version: {len(conflict['head_version'])} chars")
+                  print(f"    Incoming version: {len(conflict['incoming_version'])} chars")
+                  
+                  # Ask AI to resolve just this conflict
+                  prompt = f"""You are resolving ONE git merge conflict in a backport PR.
 
           **Context:**
-          - Backporting from main to `{base_branch}`
-          - File: `{filepath}`
+          - Backporting to `{base_branch}`
+          - This is conflict region {i+1} of {len(conflicts)} in file `{filepath}`
 
-          **The file with conflict markers:**
+          **HEAD version (what's in the release branch):**
           ```
-          {conflicted_content}
+          {conflict['head_version']}
+          ```
+
+          **Incoming version (what the backport is trying to apply):**
+          ```
+          {conflict['incoming_version']}
           ```
 
           **Your task:**
-          Return the COMPLETE file with conflicts resolved.
+          Provide the RESOLVED content for this conflict region only.
 
-          **Critical rules:**
-          1. You MUST return the ENTIRE file content, not just the conflicting section
-          2. Keep ALL code that doesn't have conflict markers - change NOTHING outside the conflict regions
-          3. Only modify lines between <<<<<<< and >>>>>>> markers
-          4. Remove conflict markers: <<<<<<, =======, >>>>>>>
-          5. For the conflicting section, intelligently merge:
-             - If release branch has important comments/context, keep them
-             - If backport removes unused code, prefer the removal
-             - Preserve the intent of both changes when possible
+          **Rules:**
+          1. Return ONLY the resolved content (no markers, no explanations)
+          2. If incoming removes code, prefer the removal unless release branch has critical differences
+          3. If incoming adds code, include it unless it conflicts with release-specific changes
+          4. Keep important comments from the release branch
+          5. No markdown blocks, just the raw resolved content
 
-          Return ONLY the complete resolved file content. No explanations, no markdown blocks, just the raw file.
+          Return ONLY the resolved content for this section:
           """
 
-              print("\n📤 Sending prompt to Claude AI...")
-              print(f"Prompt length: {len(prompt)} characters")
-              print(f"Conflicted content length: {len(conflicted_content)} lines")
-              
-              response = client.messages.create(
-                  model="claude-sonnet-4-20250514",
-                  max_tokens=16000,
-                  messages=[{"role": "user", "content": prompt}]
-              )
+                  print(f"    📤 Sending to AI... (prompt: {len(prompt)} chars)")
+                  
+                  response = client.messages.create(
+                      model="claude-sonnet-4-20250514",
+                      max_tokens=2000,
+                      messages=[{"role": "user", "content": prompt}]
+                  )
 
-              print(f"\n📥 Received response from Claude AI")
-              print(f"Response length: {len(response.content[0].text)} characters")
-              print(f"Stop reason: {response.stop_reason}")
-              print(f"Usage: {response.usage.input_tokens} input tokens, {response.usage.output_tokens} output tokens")
+                  resolution = response.content[0].text.strip()
+                  
+                  # Clean up markdown if present
+                  if resolution.startswith("```"):
+                      lines = resolution.split('\n')
+                      resolution = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
+                      resolution = resolution.strip()
+                  
+                  print(f"    📥 Received: {len(resolution)} chars, {response.usage.input_tokens} in / {response.usage.output_tokens} out tokens")
+                  print(f"    Resolution preview: {resolution[:100]}{'...' if len(resolution) > 100 else ''}")
+                  
+                  # Store the resolution
+                  conflict['resolved'] = resolution
               
-              resolved_content = response.content[0].text
+              # Replace all conflicts with resolutions (work backwards to maintain indices)
+              for i in range(len(conflicts) - 1, -1, -1):
+                  conflict = conflicts[i]
+                  resolved_content = resolved_content[:conflict['start']] + conflict['resolved'] + resolved_content[conflict['end']:]
               
-              print(f"\n🔍 AI Response Preview (first 500 chars):")
-              print(resolved_content[:500])
-              print("..." if len(resolved_content) > 500 else "")
-              
-              # Clean up any accidental markdown code blocks
-              if resolved_content.startswith("```"):
-                  lines = resolved_content.split('\n')
-                  # Remove first line (```) and last line (```)
-                  resolved_content = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
-              
-              # Sanity check: make sure we didn't lose too much code
-              original_lines = len(conflicted_content.split('\n'))
-              resolved_lines = len(resolved_content.split('\n'))
-              
-              print(f"\n📊 Sanity check:")
-              print(f"   Original file: {original_lines} lines")
-              print(f"   Resolved file: {resolved_lines} lines")
-              print(f"   Change: {resolved_lines - original_lines:+d} lines ({100.0 * resolved_lines / original_lines:.1f}%)")
-              
-              # Allow up to 20% reduction in lines (for removed code) but not more
-              if resolved_lines < original_lines * 0.5:
-                  print(f"\n⚠️  WARNING: Resolved file is much smaller ({resolved_lines} vs {original_lines} lines)")
-                  print("   This might indicate the AI didn't return the complete file.")
-                  print("   Falling back to simple conflict resolution...")
-                  # Simple fallback: just take the HEAD version (remove base changes)
-                  import re
-                  resolved_content = re.sub(r'<<<<<<< HEAD\n(.*?)\n=======\n.*?\n>>>>>>> .*?\n', r'\1\n', conflicted_content, flags=re.DOTALL)
-                  print(f"   Fallback result: {len(resolved_content.split(chr(10)))} lines")
+              print(f"\n📊 Result:")
+              print(f"   Original file: {len(conflicted_content.split(chr(10)))} lines")
+              print(f"   Resolved file: {len(resolved_content.split(chr(10)))} lines")
 
               # Write the resolved content
               print(f"\n💾 Writing resolved content to {filepath}")
