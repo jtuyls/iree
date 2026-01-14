@@ -37,7 +37,7 @@ jobs:
           echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
           
           # Get PR details
-          gh pr view $PR_NUMBER --json headRefName,baseRefName,title,body > pr_info.json
+          gh pr view $PR_NUMBER --repo ${{ github.repository }} --json headRefName,baseRefName,title,body > pr_info.json
           
           HEAD_BRANCH=$(jq -r '.headRefName' pr_info.json)
           BASE_BRANCH=$(jq -r '.baseRefName' pr_info.json)
@@ -142,8 +142,9 @@ jobs:
               original_diff = ""
               if original_pr:
                   try:
+                      repo = os.environ.get('GITHUB_REPOSITORY', '')
                       original_diff = subprocess.check_output(
-                          ['gh', 'pr', 'diff', original_pr, '--patch'],
+                          ['gh', 'pr', 'diff', original_pr, '--repo', repo, '--patch'],
                           text=True,
                           env={**os.environ, 'GH_TOKEN': os.environ['GITHUB_TOKEN']}
                       )
@@ -226,6 +227,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
           HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
           ORIGINAL_PR: ${{ steps.pr.outputs.original_pr }}
