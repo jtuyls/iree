@@ -185,13 +185,26 @@ jobs:
           Return ONLY the complete resolved file content. No explanations, no markdown blocks, just the raw file.
           """
 
+              print("\n📤 Sending prompt to Claude AI...")
+              print(f"Prompt length: {len(prompt)} characters")
+              print(f"Conflicted content length: {len(conflicted_content)} lines")
+              
               response = client.messages.create(
                   model="claude-sonnet-4-20250514",
                   max_tokens=16000,
                   messages=[{"role": "user", "content": prompt}]
               )
 
+              print(f"\n📥 Received response from Claude AI")
+              print(f"Response length: {len(response.content[0].text)} characters")
+              print(f"Stop reason: {response.stop_reason}")
+              print(f"Usage: {response.usage.input_tokens} input tokens, {response.usage.output_tokens} output tokens")
+              
               resolved_content = response.content[0].text
+              
+              print(f"\n🔍 AI Response Preview (first 500 chars):")
+              print(resolved_content[:500])
+              print("..." if len(resolved_content) > 500 else "")
               
               # Clean up any accidental markdown code blocks
               if resolved_content.startswith("```"):
@@ -203,23 +216,30 @@ jobs:
               original_lines = len(conflicted_content.split('\n'))
               resolved_lines = len(resolved_content.split('\n'))
               
+              print(f"\n📊 Sanity check:")
+              print(f"   Original file: {original_lines} lines")
+              print(f"   Resolved file: {resolved_lines} lines")
+              print(f"   Change: {resolved_lines - original_lines:+d} lines ({100.0 * resolved_lines / original_lines:.1f}%)")
+              
               # Allow up to 20% reduction in lines (for removed code) but not more
               if resolved_lines < original_lines * 0.5:
-                  print(f"WARNING: Resolved file is much smaller ({resolved_lines} vs {original_lines} lines)")
-                  print("This might indicate the AI didn't return the complete file.")
-                  print("Falling back to simple conflict resolution...")
+                  print(f"\n⚠️  WARNING: Resolved file is much smaller ({resolved_lines} vs {original_lines} lines)")
+                  print("   This might indicate the AI didn't return the complete file.")
+                  print("   Falling back to simple conflict resolution...")
                   # Simple fallback: just take the HEAD version (remove base changes)
                   import re
                   resolved_content = re.sub(r'<<<<<<< HEAD\n(.*?)\n=======\n.*?\n>>>>>>> .*?\n', r'\1\n', conflicted_content, flags=re.DOTALL)
+                  print(f"   Fallback result: {len(resolved_content.split(chr(10)))} lines")
 
               # Write the resolved content
+              print(f"\n💾 Writing resolved content to {filepath}")
               with open(filepath, 'w') as f:
                   f.write(resolved_content)
               
               # Stage the resolved file
               subprocess.run(['git', 'add', filepath], check=True)
               
-              print(f"✅ Resolved: {filepath}")
+              print(f"\n✅ Resolved: {filepath}")
 
           print("\n" + "="*60)
           print("All conflicts resolved!")
