@@ -248,8 +248,11 @@ jobs:
           PR_NUMBER=${{ steps.pr.outputs.number }}
           
           if [ "${{ steps.conflicts.outputs.has_conflicts }}" == "true" ]; then
-            # Remove the conflict label, add resolved label
-            gh pr edit $PR_NUMBER --remove-label "needs-ai-resolution,backport-conflict" --add-label "ai-conflict-resolved"
+            # Remove conflict labels (ignore errors if they don't exist)
+            gh pr edit $PR_NUMBER --remove-label "needs-ai-resolution" || true
+            gh pr edit $PR_NUMBER --remove-label "backport-conflict" || true
+            # Add resolved label
+            gh pr edit $PR_NUMBER --add-label "ai-conflict-resolved"
             
             gh pr comment $PR_NUMBER --body "🤖 **AI Conflict Resolution Complete**
             
