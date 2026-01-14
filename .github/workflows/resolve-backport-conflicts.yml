@@ -67,7 +67,7 @@ jobs:
       - name: Install dependencies
         run: pip install anthropic
 
-      - name: Attempt merge and identify conflicts
+      - name: Identify conflicts
         id: conflicts
         run: |
           git config user.name "github-actions[bot]"
@@ -76,18 +76,15 @@ jobs:
           # Fetch all branches
           git fetch origin ${{ steps.pr.outputs.base_branch }}
           
-          # Try to merge and capture conflicts
-          if git merge origin/${{ steps.pr.outputs.base_branch }} --no-commit --no-ff 2>/dev/null; then
-            echo "No conflicts detected"
-            echo "has_conflicts=false" >> $GITHUB_OUTPUT
-            git merge --abort 2>/dev/null || true
-          else
-            echo "Conflicts detected"
+          # Check for conflict markers in committed files (Mergify commits them)
+          echo "Searching for conflict markers in committed files..."
+          if git grep -l "^<<<<<<< " HEAD > conflicting_files.txt 2>/dev/null; then
+            echo "Conflicts detected in committed files"
             echo "has_conflicts=true" >> $GITHUB_OUTPUT
-            
-            # Get list of conflicting files
-            git diff --name-only --diff-filter=U > conflicting_files.txt
             cat conflicting_files.txt
+          else
+            echo "No conflict markers found in committed files"
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Resolve conflicts with AI
