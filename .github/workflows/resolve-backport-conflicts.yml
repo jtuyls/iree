@@ -161,42 +161,33 @@ jobs:
               prompt = f"""You are resolving a git merge conflict in a backport PR.
 
           **Context:**
-          - We are backporting changes from `main` to `{base_branch}`
-          - The file `{filepath}` has conflicts
+          - Backporting from main to `{base_branch}`
+          - File: `{filepath}`
 
-          **The conflicted file (with conflict markers):**
+          **The file with conflict markers:**
           ```
           {conflicted_content}
           ```
 
-          **The current version in {base_branch} (target branch):**
-          ```
-          {base_content[:5000]}
-          ```
-
-          **The version we're trying to backport:**
-          ```
-          {head_content[:5000]}
-          ```
-
-          {"**Original change from main:**" + chr(10) + "```" + chr(10) + original_diff[:3000] + chr(10) + "```" if original_diff else ""}
-
           **Your task:**
-          Resolve the conflict by producing the final merged file content. 
+          Return the COMPLETE file with conflicts resolved.
 
-          Rules:
-          1. Include the intended changes from the backport
-          2. Preserve any necessary differences in the release branch
-          3. Remove ALL conflict markers (<<<<<<, =======, >>>>>>>)
-          4. The result must be valid, compilable code
-          5. When in doubt, prefer the backported changes but adapt them to the release branch's code structure
+          **Critical rules:**
+          1. You MUST return the ENTIRE file content, not just the conflicting section
+          2. Keep ALL code that doesn't have conflict markers - change NOTHING outside the conflict regions
+          3. Only modify lines between <<<<<<< and >>>>>>> markers
+          4. Remove conflict markers: <<<<<<, =======, >>>>>>>
+          5. For the conflicting section, intelligently merge:
+             - If release branch has important comments/context, keep them
+             - If backport removes unused code, prefer the removal
+             - Preserve the intent of both changes when possible
 
-          Return ONLY the resolved file content, no explanations or markdown code blocks.
+          Return ONLY the complete resolved file content. No explanations, no markdown blocks, just the raw file.
           """
 
               response = client.messages.create(
                   model="claude-sonnet-4-20250514",
-                  max_tokens=8000,
+                  max_tokens=16000,
                   messages=[{"role": "user", "content": prompt}]
               )
 
@@ -207,6 +198,19 @@ jobs:
                   lines = resolved_content.split('\n')
                   # Remove first line (```) and last line (```)
                   resolved_content = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
+              
+              # Sanity check: make sure we didn't lose too much code
+              original_lines = len(conflicted_content.split('\n'))
+              resolved_lines = len(resolved_content.split('\n'))
+              
+              # Allow up to 20% reduction in lines (for removed code) but not more
+              if resolved_lines < original_lines * 0.5:
+                  print(f"WARNING: Resolved file is much smaller ({resolved_lines} vs {original_lines} lines)")
+                  print("This might indicate the AI didn't return the complete file.")
+                  print("Falling back to simple conflict resolution...")
+                  # Simple fallback: just take the HEAD version (remove base changes)
+                  import re
+                  resolved_content = re.sub(r'<<<<<<< HEAD\n(.*?)\n=======\n.*?\n>>>>>>> .*?\n', r'\1\n', conflicted_content, flags=re.DOTALL)
 
               # Write the resolved content
               with open(filepath, 'w') as f:
