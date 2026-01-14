@@ -11,11 +11,9 @@ pull_request_rules:
           Will attempt to backport...
 
   # Standard backport rule
-  # TODO: Change back to "merged" condition for production use
-  # Currently using label-only trigger for testing
   - name: backport to release branches
     conditions:
-      # - merged  # TODO: Uncomment for production
+      - merged
       - label=backport:backport-bot-release
     actions:
       backport:
