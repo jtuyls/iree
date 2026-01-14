@@ -78,7 +78,7 @@ jobs:
           
           # Check for conflict markers in committed files (Mergify commits them)
           echo "Searching for conflict markers in committed files..."
-          if git grep -l "^<<<<<<< " HEAD > conflicting_files.txt 2>/dev/null; then
+          if git grep -l "^<<<<<<< " HEAD 2>/dev/null | sed 's/^HEAD://' > conflicting_files.txt; then
             echo "Conflicts detected in committed files"
             echo "has_conflicts=true" >> $GITHUB_OUTPUT
             cat conflicting_files.txt
