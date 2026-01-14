@@ -9,7 +9,7 @@ pull_request_rules:
     actions:
       backport:
         branches:
-          - "{{ label | regex_search('backport:(.+)', '\\1') }}"
+          - "{{ label | regex_search('backport:(.+)') | last }}"
         labels:
           - backported
         # When conflicts occur, Mergify will label the issue/PR
