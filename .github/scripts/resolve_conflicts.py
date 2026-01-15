@@ -115,7 +115,11 @@ def resolve_file_conflicts(client, filepath, base_branch):
     # Replace all conflicts with resolutions (work backwards to maintain indices)
     for i in range(len(conflicts) - 1, -1, -1):
         conflict = conflicts[i]
-        resolved_content = resolved_content[:conflict['start']] + conflict['resolved'] + resolved_content[conflict['end']:]
+        # Ensure resolved content ends with newline if the conflict region did
+        resolution = conflict['resolved']
+        if not resolution.endswith('\n'):
+            resolution += '\n'
+        resolved_content = resolved_content[:conflict['start']] + resolution + resolved_content[conflict['end']:]
     
     print(f"\n📊 Result:")
     print(f"   Original file: {len(conflicted_content.split(chr(10)))} lines")
@@ -174,4 +178,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
