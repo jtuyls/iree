@@ -1,0 +1,97 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+name: Create Backport Issue
+
+on:
+  pull_request:
+    types: [labeled, closed]
+
+permissions:
+  issues: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  create-backport-issue:
+    # Only run when PR is merged and has a backport label
+    if: |
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'backport:backport-claude-release')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract backport target branch
+        id: extract
+        run: |
+          # Extract branch from label like "backport:release-1.0" or "backport:backport-claude-release"
+          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          BACKPORT_LABEL=$(echo "$LABELS" | jq -r '.[] | select(startswith("backport:"))' | head -1)
+          TARGET_BRANCH=$(echo "$BACKPORT_LABEL" | sed 's/backport://')
+          echo "target_branch=$TARGET_BRANCH" >> $GITHUB_OUTPUT
+          echo "Backport target: $TARGET_BRANCH"
+
+      - name: Create backport issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const prTitle = context.payload.pull_request.title;
+            const prAuthor = context.payload.pull_request.user.login;
+            const prUrl = context.payload.pull_request.html_url;
+            const targetBranch = '${{ steps.extract.outputs.target_branch }}';
+            
+            const issueTitle = `[Backport to ${targetBranch}] ${prTitle}`;
+            const issueBody = `## Backport Request
+            
+This is an automated backport request for PR #${prNumber}.
+
+**Original PR:** ${prUrl}
+**Author:** @${prAuthor}
+**Target Branch:** \`${targetBranch}\`
+
+---
+
+@claude Please backport PR #${prNumber} to the \`${targetBranch}\` branch.
+
+### Instructions:
+1. Create a new branch from \`${targetBranch}\` (e.g., \`backport-${prNumber}-to-${targetBranch}\`)
+2. Cherry-pick the commits from PR #${prNumber}
+3. Resolve any merge conflicts intelligently:
+   - Preserve critical \`${targetBranch}\`-specific code
+   - Apply the intended changes from the original PR
+   - Adapt the changes to the \`${targetBranch}\` context if needed
+4. Create a new PR targeting \`${targetBranch}\`
+5. In the PR description, add: \`Resolves #ISSUE_NUMBER\` (where ISSUE_NUMBER is this issue) so this issue closes automatically when the backport PR is merged
+6. Link the backport PR in a comment below
+
+### Context from Original PR:
+
+**Description:**
+${context.payload.pull_request.body || 'No description provided.'}
+
+---
+
+**Note:** If the backport is too complex or risky, please comment with your concerns and recommendations.
+`;
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: issueBody,
+              labels: ['backport', 'automated'],
+            });
+            
+            console.log(\`Created issue: \${issue.data.html_url}\`);
+            
+            // Comment on the original PR with a link to the backport issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: \`🤖 Backport issue created: #\${issue.data.number}\n\n@claude has been notified to handle the backport to \\\`${targetBranch}\\\`.\`
+            });
+
