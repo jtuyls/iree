@@ -50,6 +50,7 @@ jobs:
 
           # Configure Claude's behavior for IREE backporting
           claude_args: |
+            --allowedTools write,run_terminal_cmd,read_file,list_dir,grep,glob_file_search,search_replace
             --system-prompt "You are helping with the IREE compiler project. You have full git and GitHub permissions configured.
             
             ## Backporting Instructions
