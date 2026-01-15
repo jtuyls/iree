@@ -34,7 +34,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          fetch-depth: 0  # Fetch all history for backporting
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Run Claude Code
         id: claude
@@ -44,41 +50,36 @@ jobs:
 
           # Configure Claude's behavior for IREE backporting
           claude_args: |
-            --system-prompt "You are helping with the IREE compiler project.
+            --system-prompt "You are helping with the IREE compiler project. You have full git and GitHub permissions configured.
             
             ## Backporting Instructions
             
-            When asked to backport a PR to a target branch (e.g., 'backport to release-1.0' or 'backport to backport-claude-release'), follow these steps:
+            When asked to backport a PR to a target branch (e.g., 'backport to backport-claude-release'), follow these steps WITHOUT asking for permission:
             
-            1. **Identify the context:**
-               - You're on a merged PR - get the merge commit SHA from the PR metadata
-               - Extract the target branch name from the user's comment
-               - Note the PR number for branch naming
+            1. **Get the context:**
+               - Find the PR number and merge commit SHA from the PR
+               - Extract target branch name from the user's comment
             
-            2. **Create the backport branch:**
+            2. **Create backport branch and cherry-pick:**
                ```bash
                git fetch origin <target-branch>
                git checkout -b backport-<PR#>-to-<target-branch> origin/<target-branch>
-               ```
-            
-            3. **Cherry-pick the merge commit:**
-               ```bash
                git cherry-pick -m 1 <merge-commit-sha>
                ```
-               Note: Use `-m 1` to select the first parent (main branch) of the merge commit.
+               Note: For merge commits, `-m 1` selects the first parent.
             
-            4. **Handle conflicts intelligently:**
-               - **Understand the intent** - Read the original PR description to understand what it was trying to achieve
-               - **Preserve critical target branch code** - If the target branch has important code not in main, keep it
-               - **Apply the intended changes** - Adapt the PR's changes to work in the target branch context
-               - **Merge both when needed** - If both branches add different important features (e.g., different includes), keep both
+            3. **Handle conflicts intelligently:**
+               - Read the original PR to understand its intent
+               - Preserve critical target branch code that doesn't exist in the base branch
+               - Apply the intended changes, adapting them to the target branch context
+               - Keep BOTH changes when both are important (e.g., different includes/features)
                - After resolving:
                  ```bash
                  git add <resolved-files>
                  git cherry-pick --continue
                  ```
             
-            5. **Push and create PR:**
+            4. **Push and create PR:**
                ```bash
                git push origin backport-<PR#>-to-<target-branch>
                gh pr create --base <target-branch> --head backport-<PR#>-to-<target-branch> \\
@@ -90,15 +91,13 @@ jobs:
                <summary-of-changes-and-conflict-resolutions>'
                ```
             
-            6. **Comment back:**
-               - Provide the backport PR link
-               - Summarize any conflicts and how you resolved them
-               - Note any concerns for reviewers
+            5. **Comment back with:**
+               - Link to the backport PR
+               - Summary of any conflicts and resolutions
+               - Any concerns for reviewers
             
-            ## General Guidelines
-            
-            - Follow the IREE coding standards
-            - Be explicit about your reasoning when resolving conflicts
-            - If a backport seems risky or you're unsure, explain and ask for guidance
-            - Test commands before executing destructive operations"
+            ## Important
+            - You have all necessary permissions - execute commands directly
+            - Be explicit about conflict resolution reasoning
+            - If unsure or risky, explain and ask for guidance"
 
