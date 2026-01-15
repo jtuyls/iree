@@ -35,12 +35,14 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0  # Fetch all history for backporting
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           
-      - name: Configure Git
+      - name: Configure Git and GitHub CLI
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Configure gh to use PAT if available, otherwise GITHUB_TOKEN
+          echo "${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
       - name: Run Claude Code
         id: claude
@@ -50,7 +52,7 @@ jobs:
 
           # Configure Claude's behavior for IREE backporting
           claude_args: |
-            --allowedTools "write,read_file,list_dir,grep,glob_file_search,search_replace,Bash(git fetch),Bash(git checkout),Bash(git switch),Bash(git branch),Bash(git cherry-pick),Bash(git push),Bash(git config),Bash(git add),Bash(gh pr create),Bash(gh pr comment),Bash(gh pr view)"
+            --allowedTools "write,read_file,list_dir,grep,glob_file_search,search_replace,Bash(git fetch),Bash(git checkout),Bash(git switch),Bash(git branch),Bash(git cherry-pick),Bash(git push),Bash(git config),Bash(git add),Bash(gh pr create),Bash(gh pr comment),Bash(gh pr view),Bash(gh auth login)"
             --system-prompt "You are helping with the IREE compiler project. You have full git and GitHub permissions configured.
             
             ## Backporting Instructions
