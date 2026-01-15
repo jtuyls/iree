@@ -122,8 +122,8 @@ jobs:
             # Remove conflict labels (ignore errors if they don't exist)
             gh pr edit $PR_NUMBER --remove-label "needs-ai-resolution" || true
             gh pr edit $PR_NUMBER --remove-label "backport-conflict" || true
-            # Add resolved label
-            gh pr edit $PR_NUMBER --add-label "ai-conflict-resolved"
+            # Add resolved label (ignore error if label doesn't exist in repo)
+            gh pr edit $PR_NUMBER --add-label "ai-conflict-resolved" || true
             
             gh pr comment $PR_NUMBER --body "🤖 **AI Conflict Resolution Complete**
             
