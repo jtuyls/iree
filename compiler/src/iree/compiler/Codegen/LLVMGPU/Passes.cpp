@@ -31,8 +31,9 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include "mlir/Dialect/AMDGPU/Transforms/Passes.h"
-// Release: Using modern Arith transforms for improved GPU performance
-#include "mlir/Dialect/Arith/Transforms/Passes.h"
+// REQUIRED: Affine transforms essential for MI300X loop optimization
+// Do not remove - critical for tiling and memory hierarchy optimization
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
