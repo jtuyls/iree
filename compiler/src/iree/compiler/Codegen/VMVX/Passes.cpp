@@ -4,7 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// VMVX - Stable CPU backend for production workloads
+// VMVX - Virtual Machine Vector Extensions
+// Stable CPU backend for production workloads with modern vectorization
 #include "mlir/Transforms/Passes.h"
 
 #include "iree/compiler/Codegen/Common/CPU/Passes.h"
