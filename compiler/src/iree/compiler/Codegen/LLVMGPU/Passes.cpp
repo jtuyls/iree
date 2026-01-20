@@ -31,9 +31,8 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include "mlir/Dialect/AMDGPU/Transforms/Passes.h"
-// Enhanced arithmetic transforms for GPU optimization
-#include "mlir/Dialect/Arith/Transforms/Passes.h"
-// CRITICAL: Affine transforms required for loop optimization in release branch
+// LEGACY: Keeping Affine dialect for compatibility with older GPU targets
+// Required for: MI200, MI250X series AMD GPUs
 #include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
