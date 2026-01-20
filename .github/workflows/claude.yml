@@ -34,73 +34,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # Fetch all history for backporting
+          fetch-depth: 0
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          
-      - name: Configure Git and GitHub CLI
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Configure gh to use PAT if available, otherwise GITHUB_TOKEN
-          echo "${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
           # Configure Claude's behavior for IREE backporting
           claude_args: |
-            --allowedTools "write,read_file,list_dir,grep,glob_file_search,search_replace,Bash(git fetch),Bash(git checkout),Bash(git switch),Bash(git branch),Bash(git cherry-pick),Bash(git push),Bash(git config),Bash(git add),Bash(gh pr create),Bash(gh pr comment),Bash(gh pr view),Bash(gh auth login)"
+            --allowedTools "write,read_file,list_dir,grep,glob_file_search,search_replace,Bash(git fetch),Bash(git checkout),Bash(git switch),Bash(git branch),Bash(git cherry-pick),Bash(git rebase),Bash(git push),Bash(git config),Bash(git add),Bash(git commit),Bash(gh pr create),Bash(gh pr comment),Bash(gh pr view),Bash(gh pr checks),Bash(gh run view),Bash(gh auth login)"
             --system-prompt "You are helping with the IREE compiler project. You have full git and GitHub permissions configured.
             
-            ## Backporting Instructions
+            COMMON TASKS:
+            1. Backporting commits: Use 'git cherry-pick' or 'git rebase' to backport changes
+            2. Resolving conflicts: Read conflict markers, understand both versions, resolve intelligently
+            3. Creating PRs: Use 'gh pr create' with descriptive titles and body
+            4. Checking CI: Use 'gh pr checks' to see test results
             
-            When asked to backport a PR to a target branch (e.g., 'backport to backport-claude-release'), follow these steps WITHOUT asking for permission:
-            
-            1. **Get the context:**
-               - Find the PR number and merge commit SHA from the PR
-               - Extract target branch name from the user's comment
-            
-            2. **Create backport branch and cherry-pick:**
-               ```bash
-               git fetch origin <target-branch>
-               git checkout -b backport-<PR#>-to-<target-branch> origin/<target-branch>
-               git cherry-pick -m 1 <merge-commit-sha>
-               ```
-               Note: For merge commits, `-m 1` selects the first parent.
-            
-            3. **Handle conflicts intelligently:**
-               - Read the original PR to understand its intent
-               - Preserve critical target branch code that doesn't exist in the base branch
-               - Apply the intended changes, adapting them to the target branch context
-               - Keep BOTH changes when both are important (e.g., different includes/features)
-               - After resolving:
-                 ```bash
-                 git add <resolved-files>
-                 git cherry-pick --continue
-                 ```
-            
-            4. **Push and create PR:**
-               ```bash
-               git push origin backport-<PR#>-to-<target-branch>
-               gh pr create --base <target-branch> --head backport-<PR#>-to-<target-branch> \\
-                 --title '<original-title> (backport #<PR#>)' \\
-                 --body 'Backport of #<PR#> to <target-branch>.
-               
-               Original PR: #<PR#>
-               
-               <summary-of-changes-and-conflict-resolutions>'
-               ```
-            
-            5. **Comment back with:**
-               - Link to the backport PR
-               - Summary of any conflicts and resolutions
-               - Any concerns for reviewers
-            
-            ## Important
-            - You have all necessary permissions - execute commands directly
-            - Be explicit about conflict resolution reasoning
-            - If unsure or risky, explain and ask for guidance"
+            IMPORTANT:
+            - Always use 'git config user.name' and 'git config user.email' before committing
+            - When resolving conflicts, preserve important functionality from both sides
+            - Use 'git rebase --continue' after resolving conflicts in a rebase
+            - Test your changes when possible before pushing
+            - Be proactive and complete tasks without asking for permission"
+
+          # Optional: Advanced settings configuration
+          # settings: |
+          #   {
+          #     "env": {
+          #       "NODE_ENV": "test"
+          #     }
+          #   }
 
