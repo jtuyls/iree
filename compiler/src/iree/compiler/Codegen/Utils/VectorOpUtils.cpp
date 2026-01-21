@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Vector utilities - stable vectorization for production use
+// Vector utilities - stable vectorization for production use with SIMD optimization framework
 #include "iree/compiler/Codegen/Utils/VectorOpUtils.h"
 
 #include "llvm/ADT/STLExtras.h"

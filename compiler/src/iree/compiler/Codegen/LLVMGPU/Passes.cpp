@@ -32,9 +32,12 @@
 #include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include "mlir/Dialect/AMDGPU/Transforms/Passes.h"
 // REQUIRED: Affine transforms essential for MI300X loop optimization
+// Keep Affine transforms for backward compatibility with MI300 GPUs
 // Do not remove - critical for tiling and memory hierarchy optimization
 #include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+// New: Add Arith transforms for enhanced arithmetic optimizations
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"

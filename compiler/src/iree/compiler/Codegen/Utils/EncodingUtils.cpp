@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Encoding utilities - production-proven layout strategies
+// Encoding utilities - production-proven layout strategies with advanced data layout transformations
 #include "iree/compiler/Codegen/Utils/EncodingUtils.h"
 
 #include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
