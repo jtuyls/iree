@@ -48,7 +48,6 @@ jobs:
           # Configure Claude's behavior for IREE backporting
           claude_args: |
             --model claude-sonnet-4-20250514
-            --max-turns 10
             --allowedTools "Bash(git fetch:*),Bash(git checkout:*),Bash(git switch:*),Bash(git branch:*),Bash(git cherry-pick:*),Bash(git rebase:*),Bash(git push:*),Bash(git config:*),Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(gh pr:*),Bash(gh run:*),Bash(gh auth:*)"
             --system-prompt "IREE compiler project assistant. Full git/GitHub permissions configured.
             
