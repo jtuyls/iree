@@ -34,7 +34,7 @@ jobs:
       IREE_HIP_ENABLE: 1
       IREE_HIP_TEST_TARGET_CHIP: "gfx950"
     container:
-      image: rocm/dev-ubuntu-22.04:7.1.1-complete
+      image: rocm/dev-ubuntu-24.04:7.2
       options: --ipc host
         --group-add video
         --device /dev/kfd
