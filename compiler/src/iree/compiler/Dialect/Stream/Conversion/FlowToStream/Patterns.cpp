@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/Stream/Conversion/FlowToStream/Patterns.h"
 
+#include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Stream/Conversion/PatternUtils.h"
@@ -259,6 +260,174 @@ struct ConvertTensorEncodeOp
         op.getResult().getType(), flattenValues(adaptor.getResultDims()),
         resultSize, executionAffinityAttr);
     rewriter.replaceOpWithMultiple(op, {{encodeOp, resultSize}});
+    return success();
+  }
+};
+
+struct ConvertHoistableDispatchOp
+    : public AffinityAwareConversionPattern<
+          IREE::Flow::HoistableDispatchOp> {
+  using AffinityAwareConversionPattern::AffinityAwareConversionPattern;
+  LogicalResult
+  matchAndRewrite(IREE::Flow::HoistableDispatchOp op,
+                  OneToNOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Get affinity from the first result.
+    auto executionAffinityAttr =
+        op.getNumResults() > 0 ? lookupResultAffinity(op.getResult(0))
+                               : IREE::Stream::AffinityAttr{};
+
+    // Collect input resources and sizes.
+    SmallVector<Value> inputResources;
+    SmallVector<Value> inputSizes;
+    SmallVector<Attribute> inputEncodings;
+    for (auto [flowInput, streamInputs] :
+         llvm::zip_equal(op.getInputs(), adaptor.getInputs())) {
+      auto input = transferTensorOperands(op.getLoc(), flowInput, streamInputs,
+                                          executionAffinityAttr, rewriter);
+      inputResources.push_back(input.resource);
+      inputSizes.push_back(input.resourceSize);
+      inputEncodings.push_back(TypeAttr::get(flowInput.getType()));
+    }
+
+    // Build result sizes and encodings.
+    SmallVector<Value> resultSizes;
+    SmallVector<Type> resultTypes;
+    SmallVector<Attribute> resultEncodings;
+    auto unknownType = rewriter.getType<IREE::Stream::ResourceType>();
+    for (auto [idx, result] : llvm::enumerate(op.getResults())) {
+      auto resultDims = op.getResultDynamicDims(idx);
+      auto resultSize = buildResultSizeOf(op.getLoc(), result, resultDims,
+                                          executionAffinityAttr, rewriter);
+      resultSizes.push_back(resultSize);
+      resultTypes.push_back(unknownType);
+      resultEncodings.push_back(TypeAttr::get(result.getType()));
+    }
+
+    // Create the stream encoding dispatch region.
+    auto streamOp = IREE::Stream::HoistableDispatchOp::create(
+        rewriter, op.getLoc(), resultTypes, inputResources,
+        rewriter.getArrayAttr(inputEncodings),
+        flattenValues(adaptor.getInputDims()), inputSizes,
+        rewriter.getArrayAttr(resultEncodings),
+        flattenValues(adaptor.getResultDims()), resultSizes,
+        executionAffinityAttr);
+
+    // Create an empty block for the region (no block arguments - uses implicit
+    // capture).
+    Block *streamBlock = rewriter.createBlock(&streamOp.getBody());
+
+    // Map the flow inputs to stream resources/sizes for implicit capture.
+    // The encoding ops inside the region capture values directly from outside.
+    IRMapping mapping;
+    DenseMap<Value, Value> sizeMapping;
+    for (auto [idx, flowInput] : llvm::enumerate(op.getInputs())) {
+      mapping.map(flowInput, inputResources[idx]);
+      sizeMapping[flowInput] = inputSizes[idx];
+    }
+
+    // Convert operations from the flow region to the stream region.
+    Block &flowBlock = op.getBody().front();
+    rewriter.setInsertionPointToStart(streamBlock);
+    for (Operation &bodyOp : flowBlock) {
+      if (isa<IREE::Flow::ReturnOp>(&bodyOp)) {
+        // Convert flow.return to stream.yield with (resource, size) pairs.
+        auto flowReturn = cast<IREE::Flow::ReturnOp>(&bodyOp);
+        SmallVector<Value> yieldResources;
+        SmallVector<Value> yieldSizes;
+        for (Value v : flowReturn.getOperands()) {
+          Value resource = mapping.lookupOrDefault(v);
+          Value size = sizeMapping.lookup(v);
+          yieldResources.push_back(resource);
+          yieldSizes.push_back(size ? size : resultSizes[yieldResources.size() - 1]);
+        }
+        IREE::Stream::YieldOp::create(rewriter, flowReturn.getLoc(),
+                                      yieldResources, yieldSizes);
+      } else if (auto setEncoding =
+                     dyn_cast<IREE::Encoding::SetEncodingOp>(&bodyOp)) {
+        // Convert set_encoding to stream.tensor.encode.
+        Value sourceResource = mapping.lookupOrDefault(setEncoding.getSource());
+        Value sourceSize = sizeMapping.lookup(setEncoding.getSource());
+
+        auto sourceType = setEncoding.getSourceType();
+        auto resultType = setEncoding.getResultType();
+
+        // Get dynamic dims from the dispatch region's input_dims (already
+        // converted). For set_encoding, source and result have the same shape.
+        SmallVector<Value> sourceDynamicDims;
+        for (auto flatDims : adaptor.getInputDims()) {
+          for (Value dim : flatDims) {
+            sourceDynamicDims.push_back(dim);
+          }
+        }
+        SmallVector<Value> resultDynamicDims = sourceDynamicDims;
+
+        // Compute the result size using tensor.sizeof.
+        Value encResultSize = IREE::Stream::TensorSizeOfOp::create(
+            rewriter, setEncoding.getLoc(), resultType, resultDynamicDims,
+            executionAffinityAttr);
+
+        auto encodeOp = IREE::Stream::TensorEncodeOp::create(
+            rewriter, setEncoding.getLoc(), unknownType, sourceResource,
+            sourceType, sourceDynamicDims, sourceSize, resultType,
+            resultDynamicDims, encResultSize, executionAffinityAttr);
+        mapping.map(setEncoding.getResult(), encodeOp.getResult());
+        sizeMapping[setEncoding.getResult()] = encResultSize;
+      } else if (auto unsetEncoding =
+                     dyn_cast<IREE::Encoding::UnsetEncodingOp>(&bodyOp)) {
+        // Convert unset_encoding to stream.tensor.encode.
+        Value sourceResource =
+            mapping.lookupOrDefault(unsetEncoding.getSource());
+        Value sourceSize = sizeMapping.lookup(unsetEncoding.getSource());
+
+        auto sourceType = unsetEncoding.getSourceType();
+        auto resultType = unsetEncoding.getResultType();
+
+        // Get dynamic dims - for unset_encoding, use input_dims for source
+        // and result_dims for result.
+        SmallVector<Value> sourceDynamicDims;
+        for (auto flatDims : adaptor.getInputDims()) {
+          for (Value dim : flatDims) {
+            sourceDynamicDims.push_back(dim);
+          }
+        }
+        SmallVector<Value> resultDynamicDims;
+        for (auto flatDims : adaptor.getResultDims()) {
+          for (Value dim : flatDims) {
+            resultDynamicDims.push_back(dim);
+          }
+        }
+
+        // Compute the result size using tensor.sizeof.
+        Value encResultSize = IREE::Stream::TensorSizeOfOp::create(
+            rewriter, unsetEncoding.getLoc(), resultType, resultDynamicDims,
+            executionAffinityAttr);
+
+        auto encodeOp = IREE::Stream::TensorEncodeOp::create(
+            rewriter, unsetEncoding.getLoc(), unknownType, sourceResource,
+            sourceType, sourceDynamicDims, sourceSize, resultType,
+            resultDynamicDims, encResultSize, executionAffinityAttr);
+        mapping.map(unsetEncoding.getResult(), encodeOp.getResult());
+        sizeMapping[unsetEncoding.getResult()] = encResultSize;
+      } else {
+        // Clone other ops directly.
+        Operation *cloned = rewriter.clone(bodyOp, mapping);
+        for (auto [oldResult, newResult] :
+             llvm::zip_equal(bodyOp.getResults(), cloned->getResults())) {
+          mapping.map(oldResult, newResult);
+        }
+      }
+    }
+
+    // Replace uses with results and sizes.
+    SmallVector<SmallVector<Value>> replacementsVec;
+    for (auto [result, size] :
+         llvm::zip_equal(streamOp.getResults(), resultSizes)) {
+      replacementsVec.push_back({result, size});
+    }
+    SmallVector<ValueRange> replacements = llvm::map_to_vector(
+        replacementsVec, [](ArrayRef<Value> v) -> ValueRange { return v; });
+    rewriter.replaceOpWithMultiple(op, replacements);
     return success();
   }
 };
@@ -1222,7 +1391,8 @@ void populateFlowToStreamConversionPatterns(
       ConvertTensorCastLikeOp<IREE::Flow::TensorReshapeOp>,
       ConvertTensorCastLikeOp<IREE::Flow::TensorBitCastOp>,
       ConvertTensorAllocaOp, ConvertTensorEmptyOp, ConvertTensorSplatOp,
-      ConvertTensorCloneOp, ConvertTensorEncodeOp, ConvertTensorBarrierOp,
+      ConvertTensorCloneOp, ConvertTensorEncodeOp,
+      ConvertHoistableDispatchOp, ConvertTensorBarrierOp,
       ConvertTensorTransferOp, ConvertTensorSliceOp, ConvertTensorUpdateOp,
       ConvertTensorLoadOp, ConvertTensorStoreOp, ConvertTensorTraceOp>(
       typeConverter, context, affinityAnalysis);
@@ -1262,6 +1432,10 @@ void populateFlowToStreamConversionPatterns(
   conversionTarget.addIllegalDialect<IREE::Flow::FlowDialect>();
   conversionTarget.addLegalOp<IREE::Stream::ExecutableOp>();
   conversionTarget.markOpRecursivelyLegal<IREE::Stream::ExecutableOp>();
+  // HoistableDispatchOp contains encoding ops that will be materialized
+  // later - we don't want to convert those during this pass.
+  conversionTarget.addLegalOp<IREE::Stream::HoistableDispatchOp>();
+  conversionTarget.markOpRecursivelyLegal<IREE::Stream::HoistableDispatchOp>();
 
   populateFlowToStreamConversionPatterns(context, typeConverter,
                                          affinityAnalysis, patterns);

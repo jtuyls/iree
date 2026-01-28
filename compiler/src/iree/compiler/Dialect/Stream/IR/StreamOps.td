@@ -1403,6 +1403,73 @@ def Stream_TensorEncodeOp : Stream_PureOp<"tensor.encode", [
   let hasFolder = 1;
 }
 
+def Stream_HoistableDispatchOp : Stream_PureOp<"hoistable_dispatch", [
+  SingleBlockImplicitTerminator<"IREE::Stream::YieldOp">,
+  AttrSizedOperandSegments,
+  Stream_AffinityOp,
+  Stream_TensorPhaseOp,
+  Util_ShapeAwareOp,
+  Util_SizeAwareOp,
+]> {
+  let summary = [{A hoistable dispatch containing pure operations.}];
+  let description = [{
+    This op is a container for pure operations in the Stream dialect.
+    It represents a dispatch that can be hoisted into initializers
+    for globals and unified across multiple uses.
+
+    Unlike regular stream.async.dispatch ops, this op:
+    - Is in the tensor phase (works with stream resources representing tensors)
+    - Can be unified with similar operations
+    - Can be specialized based on encoding parameters
+    - Is eventually materialized into actual dispatches
+
+    The region contains stream.tensor.encode ops that perform the encoding.
+    Values from parent regions can be captured implicitly.
+
+    Example:
+    ```mlir
+    %result = stream.hoistable_dispatch(%input : tensor<4x8xf32>
+        in !stream.resource<*>{%input_size}) -> (tensor<4x8xf32, #encoding>
+        in !stream.resource<*>{%out_size}) {
+      %enc = stream.tensor.encode %input : tensor<4x8xf32> in !stream.resource<*>{%input_size}
+          -> tensor<4x8xf32, #encoding> in !stream.resource<*>{%enc_size}
+      stream.yield %enc : !stream.resource<*>
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<Stream_AnyStreamResource>:$inputs,
+    TypeArrayAttr:$input_encodings,
+    Stream_ShapeDynamicDims:$input_dims,
+    Variadic<Stream_Size>:$input_sizes,
+    TypeArrayAttr:$result_encodings,
+    Stream_ShapeDynamicDims:$result_dims,
+    Variadic<Stream_Size>:$result_sizes,
+    OptionalAttr<Stream_AffinityAttr>:$affinity
+  );
+  let results = (outs
+    Variadic<Stream_AnyStreamResource>:$results
+  );
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    ValueRange getOperandDynamicDims(unsigned idx);
+    ValueRange getResultDynamicDims(unsigned idx);
+    Value getOperandSize(unsigned idx) { return getInputSizes()[idx]; }
+    Value getResultSize(unsigned idx) { return getResultSizes()[idx]; }
+
+    // Get block arguments - each input has (resource, size) pair.
+    Block::BlockArgListType getInputBlockArguments() {
+      return getBody().front().getArguments();
+    }
+  }];
+}
+
 def Stream_TensorSliceOp : Stream_PureOp<"tensor.slice", [
   AttrSizedOperandSegments,
   Stream_AffinityOp,
@@ -5071,6 +5138,7 @@ def Stream_YieldOp : Stream_Op<"yield", [
     "IREE::Stream::CmdExecuteOp",
     "IREE::Stream::CmdSerialOp",
     "IREE::Stream::CmdConcurrentOp",
+    "IREE::Stream::HoistableDispatchOp",
   ]>,
   Pure,
   DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface>,

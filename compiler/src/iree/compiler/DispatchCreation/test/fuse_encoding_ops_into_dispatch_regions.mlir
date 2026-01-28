@@ -155,7 +155,7 @@ util.func public @multi_encoding_fusion_dynamic(%arg0: tensor<?x?x?xf32>, %d0: i
 // CHECK:            %[[ADD:.+]] = linalg.generic
 // CHECK:            flow.return %[[ADD]] :
 // CHECK:          }
-// CHECK-COUNT-2:  iree_encoding.set_encoding %[[DISPATCH]]
+// CHECK-COUNT-2:  flow.hoistable_dispatch(%[[DISPATCH]] : tensor<?x?x?xf32>{%[[D0]], %[[D1]], %[[D2]]})
 
 // -----
 
@@ -377,7 +377,7 @@ util.func public @multi_use_producer_fusion(%arg0: tensor<2x11008x128xf32>) -> (
 // CHECK:         %[[ADD:.+]] = linalg.generic
 // CHECK:         flow.return %[[ADD]] :
 // CHECK:       }
-// CHECK:       %[[ENCODING:.+]] = iree_encoding.set_encoding %[[DISPATCH0]]
+// CHECK:       %[[ENCODING:.+]] = flow.hoistable_dispatch(%[[DISPATCH0]] : tensor<2x11008x128xf32>)
 // CHECK:       util.return %[[DISPATCH0]], %[[ENCODING:.+]] : tensor<2x11008x128xf32>, tensor<2x11008x128xf32, #[[$ENCODING]]>
 
 // MULTI-USE-DAG:   #[[$ENCODING:.+]] = #iree_encoding.testing<>

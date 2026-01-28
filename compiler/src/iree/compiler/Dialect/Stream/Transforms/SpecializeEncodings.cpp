@@ -138,6 +138,19 @@ static bool hasRecognizedEncoding(ModuleOp moduleOp, SymbolTable &symbolTable,
         return isRecognizedEncodingType(op.getSourceEncoding()) ||
                isRecognizedEncodingType(op.getResultEncoding());
       })
+      .Case<IREE::Stream::HoistableDispatchOp>([&](auto op) {
+        for (auto typeAttr : op.getInputEncodings().template getAsRange<TypeAttr>()) {
+          if (isRecognizedEncodingType(typeAttr.getValue())) {
+            return true;
+          }
+        }
+        for (auto typeAttr : op.getResultEncodings().template getAsRange<TypeAttr>()) {
+          if (isRecognizedEncodingType(typeAttr.getValue())) {
+            return true;
+          }
+        }
+        return false;
+      })
       .Default([](Operation *op) { return false; });
 }
 
@@ -463,6 +476,54 @@ updateTensorEncodeOp(RewriterBase &rewriter, IREE::Stream::TensorEncodeOp op,
   return success();
 }
 
+/// Updates the input_encodings and result_encodings attributes, and also
+/// updates all TensorEncodeOp and TensorSizeOfOp inside the region.
+static LogicalResult updateHoistableDispatchOp(
+    RewriterBase &rewriter, IREE::Stream::HoistableDispatchOp op,
+    const SetVector<Attribute> &layoutResolvers) {
+  // Update input_encodings attribute.
+  SmallVector<Attribute> newInputEncodings;
+  for (auto typeAttr : op.getInputEncodings().getAsRange<TypeAttr>()) {
+    Type type = typeAttr.getValue();
+    Type newType = getTypeWithResolvedEncodingLayouts(type, layoutResolvers);
+    if (!newType) {
+      return op.emitOpError("failed to resolve input encoding layout");
+    }
+    newInputEncodings.push_back(TypeAttr::get(newType));
+  }
+
+  // Update result_encodings attribute.
+  SmallVector<Attribute> newResultEncodings;
+  for (auto typeAttr : op.getResultEncodings().getAsRange<TypeAttr>()) {
+    Type type = typeAttr.getValue();
+    Type newType = getTypeWithResolvedEncodingLayouts(type, layoutResolvers);
+    if (!newType) {
+      return op.emitOpError("failed to resolve result encoding layout");
+    }
+    newResultEncodings.push_back(TypeAttr::get(newType));
+  }
+
+  rewriter.modifyOpInPlace(op, [&] {
+    op.setInputEncodingsAttr(rewriter.getArrayAttr(newInputEncodings));
+    op.setResultEncodingsAttr(rewriter.getArrayAttr(newResultEncodings));
+  });
+
+  // Update ops inside the region.
+  for (Operation &innerOp : op.getBody().front()) {
+    if (auto encodeOp = dyn_cast<IREE::Stream::TensorEncodeOp>(&innerOp)) {
+      if (failed(updateTensorEncodeOp(rewriter, encodeOp, layoutResolvers))) {
+        return failure();
+      }
+    } else if (auto sizeOfOp = dyn_cast<IREE::Stream::TensorSizeOfOp>(&innerOp)) {
+      if (failed(updateTensorSizeOfOp(rewriter, sizeOfOp, layoutResolvers))) {
+        return failure();
+      }
+    }
+  }
+
+  return success();
+}
+
 LogicalResult StreamTensorOpUpdater::run() {
   IREE::Stream::AffinityAnalysis affinityAnalysis(moduleOp);
   if (failed(affinityAnalysis.run())) {
@@ -509,6 +570,10 @@ LogicalResult StreamTensorOpUpdater::run() {
             })
             .Case<IREE::Stream::TensorEncodeOp>([&](auto op) {
               return updateTensorEncodeOp(rewriter, op, layoutResolvers);
+            })
+            .Case<IREE::Stream::HoistableDispatchOp>([&](auto op) {
+              return updateHoistableDispatchOp(rewriter, op,
+                                                    layoutResolvers);
             })
             .Case<IREE::Stream::TensorCloneOp>(
                 [&](auto op) { return updateTensorCloneOp(rewriter, op); })

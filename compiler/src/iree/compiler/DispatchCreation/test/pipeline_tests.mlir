@@ -263,7 +263,7 @@ util.func public @verify_bubbling(%arg0: !hal.buffer_view, %arg2: !hal.fence) ->
 
 // -----
 
-// Standalone set_encoding ops are wrapped in dispatch regions.
+// Standalone set_encoding ops are wrapped in encoding dispatch regions.
 #encoding = #iree_encoding.testing<>
 util.func public @set_encoding_op(%arg0 : tensor<?x?xf32>)
     -> tensor<?x?xf32, #encoding> {
@@ -273,13 +273,13 @@ util.func public @set_encoding_op(%arg0 : tensor<?x?xf32>)
 }
 // CHECK-LABEL: util.func public @set_encoding_op
 // CHECK-SAME:    %[[SRC:[a-zA-Z0-9]+]]
-// CHECK:         %[[RES:.+]] = flow.dispatch.workgroups
+// CHECK:         %[[RES:.+]] = flow.hoistable_dispatch
 // CHECK:           iree_encoding.set_encoding
 // CHECK:         util.return %[[RES]]
 
 // -----
 
-// Standalone unset_encoding ops are wrapped in dispatch regions.
+// Standalone unset_encoding ops are wrapped in encoding dispatch regions.
 #encoding = #iree_encoding.testing<>
 util.func public @unset_encoding_op(%arg0 : tensor<?x?xf32, #encoding>, %d0: index, %d1: index)
     -> tensor<?x?xf32> {
@@ -291,7 +291,7 @@ util.func public @unset_encoding_op(%arg0 : tensor<?x?xf32, #encoding>, %d0: ind
 // CHECK-SAME:    %[[SRC:[a-zA-Z0-9]+]]
 // CHECK-SAME:    %[[D0:[a-zA-Z0-9]+]]
 // CHECK-SAME:    %[[D1:[a-zA-Z0-9]+]]
-// CHECK:         %[[RES:.+]] = flow.dispatch.workgroups
+// CHECK:         %[[RES:.+]] = flow.hoistable_dispatch
 // CHECK:           iree_encoding.unset_encoding
 // CHECK:         util.return %[[RES]]
 

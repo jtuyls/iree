@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 
+#include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/Util/IR/ClosureOpUtils.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
@@ -2282,6 +2283,279 @@ LogicalResult TensorEncodeOp::verify() {
     return failure();
   }
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// stream.hoistable_dispatch
+//===----------------------------------------------------------------------===//
+
+LogicalResult HoistableDispatchOp::verify() {
+  // No block arguments expected - uses implicit capture.
+  if (!getBody().front().getArguments().empty()) {
+    return emitOpError() << "expected no block arguments";
+  }
+
+  // Verify terminator.
+  for (auto yieldOp : getBody().getOps<IREE::Stream::YieldOp>()) {
+    if (yieldOp.getResourceOperands().size() != getNumResults()) {
+      return yieldOp->emitOpError()
+             << "number of results (" << getNumResults()
+             << ") does not match number of yielded values ("
+             << yieldOp.getResourceOperands().size() << ")";
+    }
+  }
+
+  // Verify that all ops inside are allowed.
+  for (Operation &op : getBody().front()) {
+    if (isa<IREE::Stream::YieldOp>(op)) {
+      continue;
+    }
+    // Allow stream tensor encode ops.
+    if (isa<IREE::Stream::TensorEncodeOp>(&op)) {
+      continue;
+    }
+    // Allow stream async clone ops (introduced by MaterializeCopyOnWrite).
+    if (isa<IREE::Stream::AsyncCloneOp>(&op)) {
+      continue;
+    }
+    // Allow ops with no side effects.
+    if (isPure(&op)) {
+      continue;
+    }
+    return op.emitOpError()
+           << "is not allowed inside hoistable_dispatch; only "
+              "stream.tensor.encode and pure ops are allowed";
+  }
+
+  return success();
+}
+
+ParseResult HoistableDispatchOp::parse(OpAsmParser &parser,
+                                            OperationState &result) {
+  // Parse optional affinity.
+  Attribute affinityAttr;
+  if (succeeded(parser.parseOptionalKeyword("on"))) {
+    if (parser.parseLParen() ||
+        parser.parseAttribute(affinityAttr, "affinity", result.attributes) ||
+        parser.parseRParen()) {
+      return failure();
+    }
+  }
+
+  SmallVector<OpAsmParser::UnresolvedOperand> inputs;
+  SmallVector<Type> inputTypes;
+  SmallVector<Attribute> inputEncodings;
+  SmallVector<OpAsmParser::UnresolvedOperand> inputDims;
+  SmallVector<OpAsmParser::UnresolvedOperand> inputSizes;
+  SmallVector<OpAsmParser::UnresolvedOperand> resultDims;
+  SmallVector<OpAsmParser::UnresolvedOperand> resultSizes;
+  SmallVector<Type> resultTypes;
+  SmallVector<Attribute> resultEncodings;
+
+  // Parse inputs: (%input : encoding in type{size}, ...)
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseCommaSeparatedList([&]() {
+          // input : encoding{dims} in type{size}
+          if (parser.parseOperand(inputs.emplace_back()) ||
+              parser.parseColon()) {
+            return failure();
+          }
+          TypeAttr encodingAttr;
+          if (parser.parseAttribute(encodingAttr)) {
+            return failure();
+          }
+          inputEncodings.push_back(encodingAttr);
+          auto shapedType = dyn_cast<ShapedType>(encodingAttr.getValue());
+          if (shapedType && !shapedType.hasStaticShape()) {
+            SmallVector<OpAsmParser::UnresolvedOperand> dims;
+            if (parser.parseOperandList(dims, shapedType.getNumDynamicDims(),
+                                        OpAsmParser::Delimiter::Braces)) {
+              return failure();
+            }
+            inputDims.append(dims);
+          }
+          if (parser.parseKeyword("in") ||
+              parser.parseType(inputTypes.emplace_back()) ||
+              parser.parseLBrace() ||
+              parser.parseOperand(inputSizes.emplace_back()) ||
+              parser.parseRBrace()) {
+            return failure();
+          }
+          return success();
+        }) ||
+        parser.parseRParen()) {
+      return failure();
+    }
+  }
+
+  // Parse results: -> (encoding{dims} in type{size}, ...)
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseCommaSeparatedList(
+            OpAsmParser::Delimiter::Paren, [&]() {
+              TypeAttr encodingAttr;
+              if (parser.parseAttribute(encodingAttr)) {
+                return failure();
+              }
+              resultEncodings.push_back(encodingAttr);
+              auto shapedType = dyn_cast<ShapedType>(encodingAttr.getValue());
+              if (shapedType && !shapedType.hasStaticShape()) {
+                SmallVector<OpAsmParser::UnresolvedOperand> dims;
+                if (parser.parseOperandList(dims, shapedType.getNumDynamicDims(),
+                                            OpAsmParser::Delimiter::Braces)) {
+                  return failure();
+                }
+                resultDims.append(dims);
+              }
+              if (parser.parseKeyword("in") ||
+                  parser.parseType(resultTypes.emplace_back()) ||
+                  parser.parseLBrace() ||
+                  parser.parseOperand(resultSizes.emplace_back()) ||
+                  parser.parseRBrace()) {
+                return failure();
+              }
+              return success();
+            })) {
+      return failure();
+    }
+  }
+
+  // Parse attributes.
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes)) {
+    return failure();
+  }
+
+  // Parse body region (no block arguments - uses implicit capture).
+  std::unique_ptr<Region> bodyRegion = std::make_unique<Region>();
+  if (parser.parseRegion(*bodyRegion)) {
+    return failure();
+  }
+  result.addRegion(std::move(bodyRegion));
+
+  auto indexType = parser.getBuilder().getIndexType();
+
+  // Resolve operands.
+  if (parser.resolveOperands(inputs, inputTypes, parser.getCurrentLocation(),
+                             result.operands)) {
+    return failure();
+  }
+  result.addAttribute("input_encodings",
+                      parser.getBuilder().getArrayAttr(inputEncodings));
+  if (parser.resolveOperands(inputDims, indexType, result.operands)) {
+    return failure();
+  }
+  if (parser.resolveOperands(inputSizes, indexType, result.operands)) {
+    return failure();
+  }
+  result.addAttribute("result_encodings",
+                      parser.getBuilder().getArrayAttr(resultEncodings));
+  if (parser.resolveOperands(resultDims, indexType, result.operands)) {
+    return failure();
+  }
+  if (parser.resolveOperands(resultSizes, indexType, result.operands)) {
+    return failure();
+  }
+
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(inputs.size()),
+                           static_cast<int32_t>(inputDims.size()),
+                           static_cast<int32_t>(inputSizes.size()),
+                           static_cast<int32_t>(resultDims.size()),
+                           static_cast<int32_t>(resultSizes.size())}));
+  result.addTypes(resultTypes);
+  return success();
+}
+
+void HoistableDispatchOp::print(OpAsmPrinter &p) {
+  SmallVector<StringRef, 3> elidedAttrs;
+  elidedAttrs.push_back("operandSegmentSizes");
+  elidedAttrs.push_back("input_encodings");
+  elidedAttrs.push_back("result_encodings");
+
+  // Print affinity.
+  if (auto affinity = getAffinityAttr()) {
+    p << " on(" << affinity << ")";
+    elidedAttrs.push_back("affinity");
+  }
+
+  // Print inputs.
+  if (!getInputs().empty()) {
+    p << "(";
+    unsigned inputDimIdx = 0;
+    for (auto [idx, input] : llvm::enumerate(getInputs())) {
+      if (idx > 0)
+        p << ", ";
+      p << input << " : " << getInputEncodings()[idx];
+      auto encodingType =
+          cast<ShapedType>(cast<TypeAttr>(getInputEncodings()[idx]).getValue());
+      if (!encodingType.hasStaticShape()) {
+        p << "{";
+        p << getInputDims().slice(inputDimIdx, encodingType.getNumDynamicDims());
+        p << "}";
+        inputDimIdx += encodingType.getNumDynamicDims();
+      }
+      p << " in " << input.getType() << "{" << getInputSizes()[idx] << "}";
+    }
+    p << ")";
+  }
+
+  // Print results.
+  if (!getResults().empty()) {
+    p << " -> (";
+    unsigned resultDimIdx = 0;
+    for (auto [idx, result] : llvm::enumerate(getResults())) {
+      if (idx > 0)
+        p << ", ";
+      p << getResultEncodings()[idx];
+      auto encodingType =
+          cast<ShapedType>(cast<TypeAttr>(getResultEncodings()[idx]).getValue());
+      if (!encodingType.hasStaticShape()) {
+        p << "{";
+        p << getResultDims().slice(resultDimIdx,
+                                   encodingType.getNumDynamicDims());
+        p << "}";
+        resultDimIdx += encodingType.getNumDynamicDims();
+      }
+      p << " in " << result.getType() << "{" << getResultSizes()[idx] << "}";
+    }
+    p << ")";
+  }
+
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+  p << " ";
+
+  bool printTerminator = true;
+  if (auto *term =
+          getBody().empty() ? nullptr : getBody().begin()->getTerminator()) {
+    printTerminator = !term->getAttrDictionary().empty() ||
+                      term->getNumOperands() != 0 || term->getNumResults() != 0;
+  }
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/true,
+                /*printBlockTerminators=*/printTerminator);
+}
+
+ValueRange HoistableDispatchOp::getOperandDynamicDims(unsigned idx) {
+  unsigned counter = 0;
+  for (unsigned i = 0; i < idx; ++i) {
+    auto encodingType =
+        cast<ShapedType>(cast<TypeAttr>(getInputEncodings()[i]).getValue());
+    counter += encodingType.getNumDynamicDims();
+  }
+  auto encodingType =
+      cast<ShapedType>(cast<TypeAttr>(getInputEncodings()[idx]).getValue());
+  return getInputDims().slice(counter, encodingType.getNumDynamicDims());
+}
+
+ValueRange HoistableDispatchOp::getResultDynamicDims(unsigned idx) {
+  unsigned counter = 0;
+  for (unsigned i = 0; i < idx; ++i) {
+    auto encodingType =
+        cast<ShapedType>(cast<TypeAttr>(getResultEncodings()[i]).getValue());
+    counter += encodingType.getNumDynamicDims();
+  }
+  auto encodingType =
+      cast<ShapedType>(cast<TypeAttr>(getResultEncodings()[idx]).getValue());
+  return getResultDims().slice(counter, encodingType.getNumDynamicDims());
 }
 
 //===----------------------------------------------------------------------===//

@@ -671,6 +671,23 @@ def SpecializeEncodingsPass :
   ];
 }
 
+def MaterializeEncodingsPass :
+    Pass<"iree-stream-materialize-encodings", "mlir::ModuleOp"> {
+  let summary = "Materialize encoding dispatch regions to dispatches and executables.";
+  let description = [{
+    Materializes uniqued executables for `stream.encoding.dispatch_region` ops
+    and replaces them with dispatches to those executables. This should run
+    after SpecializeEncodingsPass to ensure encodings have been resolved with
+    layouts.
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "IREE::Encoding::IREEEncodingDialect",
+    "IREE::Stream::StreamDialect",
+    "IREE::TensorExt::IREETensorExtDialect",
+  ];
+}
+
 def AnnotateDispatchArgumentsPass :
     Pass<"iree-stream-annotate-dispatch-arguments", "mlir::ModuleOp"> {
   let summary = "Annotates dispatch arguments with potential values derived from dispatch sites.";

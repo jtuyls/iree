@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 
+#include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtTypes.h"
 #include "iree/compiler/Dialect/Util/IR/ClosureOpUtils.h"
@@ -665,6 +666,238 @@ void DispatchRegionOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                    MLIRContext *context) {
   results.add<DispatchRegionDropUnusedResults>(context);
 }
+
+//===----------------------------------------------------------------------===//
+// flow.hoistable_dispatch
+//===----------------------------------------------------------------------===//
+
+LogicalResult HoistableDispatchOp::verify() {
+  // No block arguments expected - uses implicit capture.
+  Block &block = getBody().front();
+  if (!block.getArguments().empty()) {
+    return emitOpError() << "expected no block arguments but got "
+                         << block.getNumArguments();
+  }
+
+  // Verify terminator.
+  for (auto returnOp : getBody().getOps<Flow::ReturnOp>()) {
+    if (returnOp.getNumOperands() != getNumResults()) {
+      return returnOp->emitOpError()
+             << "number of results (" << getNumResults()
+             << ") does not match number of returned values ("
+             << returnOp.getNumOperands() << ")";
+    }
+    for (const auto [resultType, returnType] :
+         llvm::zip_equal(getResultTypes(), returnOp->getOperandTypes())) {
+      if (resultType != returnType) {
+        return returnOp->emitOpError()
+               << "operand types do not match with parent results";
+      }
+    }
+  }
+
+  // Make sure that all results are ranked tensors.
+  for (Type t : getResultTypes()) {
+    if (!isa<RankedTensorType>(t)) {
+      return emitOpError() << "only ranked tensor results are allowed";
+    }
+  }
+
+  // Verify that all ops inside are allowed (encoding ops and pure tensor ops).
+  for (Operation &op : getBody().front()) {
+    if (isa<Flow::ReturnOp>(op)) {
+      continue;
+    }
+    // Allow encoding ops.
+    if (isa<IREE::Encoding::SetEncodingOp, IREE::Encoding::UnsetEncodingOp>(
+            &op)) {
+      continue;
+    }
+    // Allow ops with no side effects.
+    if (isPure(&op)) {
+      continue;
+    }
+    return op.emitOpError()
+           << "is not allowed inside hoistable_dispatch; only "
+              "encoding ops and pure ops are allowed";
+  }
+
+  return success();
+}
+
+ParseResult HoistableDispatchOp::parse(OpAsmParser &parser,
+                                            OperationState &result) {
+  SmallVector<OpAsmParser::UnresolvedOperand> inputs;
+  SmallVector<Type> inputTypes;
+  SmallVector<OpAsmParser::UnresolvedOperand> inputDims;
+  SmallVector<OpAsmParser::UnresolvedOperand> resultDims;
+  SmallVector<Type> resultTypes;
+
+  // Parse inputs: (%input{%d0, %d1}, ...)
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseCommaSeparatedList([&]() {
+          if (parser.parseOperand(inputs.emplace_back()) ||
+              parser.parseColonType(inputTypes.emplace_back())) {
+            return failure();
+          }
+          auto shapedType = dyn_cast<ShapedType>(inputTypes.back());
+          if (shapedType && !shapedType.hasStaticShape()) {
+            SmallVector<OpAsmParser::UnresolvedOperand> dims;
+            if (parser.parseOperandList(
+                    dims, shapedType.getNumDynamicDims(),
+                    OpAsmParser::Delimiter::Braces)) {
+              return failure();
+            }
+            inputDims.append(dims);
+          }
+          return success();
+        }) ||
+        parser.parseRParen()) {
+      return failure();
+    }
+  }
+
+  // Parse results: -> (%type{%d0}, ...)
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseCommaSeparatedList(
+            OpAsmParser::Delimiter::Paren, [&]() {
+              if (parser.parseType(resultTypes.emplace_back())) {
+                return failure();
+              }
+              auto shapedType = dyn_cast<ShapedType>(resultTypes.back());
+              if (shapedType && !shapedType.hasStaticShape()) {
+                SmallVector<OpAsmParser::UnresolvedOperand> dims;
+                if (parser.parseOperandList(dims, shapedType.getNumDynamicDims(),
+                                            OpAsmParser::Delimiter::Braces)) {
+                  return failure();
+                }
+                resultDims.append(dims);
+              }
+              return success();
+            })) {
+      return failure();
+    }
+  }
+
+  // Parse attributes.
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes)) {
+    return failure();
+  }
+
+  // Parse body region (no block arguments - uses implicit capture).
+  std::unique_ptr<Region> bodyRegion = std::make_unique<Region>();
+  if (parser.parseRegion(*bodyRegion)) {
+    return failure();
+  }
+  result.addRegion(std::move(bodyRegion));
+
+  // Resolve inputs.
+  if (parser.resolveOperands(inputs, inputTypes, parser.getCurrentLocation(),
+                             result.operands)) {
+    return failure();
+  }
+  if (parser.resolveOperands(inputDims, parser.getBuilder().getIndexType(),
+                             result.operands)) {
+    return failure();
+  }
+  if (parser.resolveOperands(resultDims, parser.getBuilder().getIndexType(),
+                             result.operands)) {
+    return failure();
+  }
+
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(inputs.size()),
+                           static_cast<int32_t>(inputDims.size()),
+                           static_cast<int32_t>(resultDims.size())}));
+  result.addTypes(resultTypes);
+  return success();
+}
+
+void HoistableDispatchOp::print(OpAsmPrinter &p) {
+  SmallVector<StringRef, 1> elidedAttrs;
+  elidedAttrs.push_back("operandSegmentSizes");
+
+  // Print inputs.
+  if (!getInputs().empty()) {
+    p << "(";
+    unsigned inputDimIdx = 0;
+    llvm::interleaveComma(getInputs(), p, [&](Value input) {
+      p << input << " : " << input.getType();
+      if (auto shapedType = dyn_cast<ShapedType>(input.getType())) {
+        if (!shapedType.hasStaticShape()) {
+          p << "{";
+          p << getInputDims().slice(inputDimIdx, shapedType.getNumDynamicDims());
+          p << "}";
+          inputDimIdx += shapedType.getNumDynamicDims();
+        }
+      }
+    });
+    p << ")";
+  }
+
+  // Print results.
+  if (!getResults().empty()) {
+    p << " -> (";
+    unsigned resultDimIdx = 0;
+    for (const auto &it : llvm::enumerate(getResultTypes())) {
+      Type type = it.value();
+      p << type;
+      if (auto shapedType = dyn_cast<ShapedType>(type)) {
+        if (!shapedType.hasStaticShape()) {
+          p << "{";
+          p << getResultDims().slice(resultDimIdx,
+                                     shapedType.getNumDynamicDims());
+          p << "}";
+          resultDimIdx += shapedType.getNumDynamicDims();
+        }
+      }
+      if (it.index() < getNumResults() - 1) {
+        p << ", ";
+      }
+    }
+    p << ")";
+  }
+
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+  p << " ";
+
+  bool printTerminator = true;
+  if (auto *term =
+          getBody().empty() ? nullptr : getBody().begin()->getTerminator()) {
+    printTerminator = !term->getAttrDictionary().empty() ||
+                      term->getNumOperands() != 0 || term->getNumResults() != 0;
+  }
+  // No block arguments - uses implicit capture.
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/printTerminator);
+}
+
+ValueRange HoistableDispatchOp::getInputDynamicDims(unsigned idx) {
+  unsigned counter = 0;
+  for (unsigned i = 0; i < idx; ++i) {
+    if (auto shapedType = dyn_cast<ShapedType>(getInputs()[i].getType())) {
+      counter += shapedType.getNumDynamicDims();
+    }
+  }
+  auto shapedType = dyn_cast<ShapedType>(getInputs()[idx].getType());
+  return getInputDims().slice(counter,
+                              shapedType ? shapedType.getNumDynamicDims() : 0);
+}
+
+ValueRange HoistableDispatchOp::getResultDynamicDims(unsigned idx) {
+  unsigned counter = 0;
+  for (unsigned i = 0; i < idx; ++i) {
+    if (auto shapedType = dyn_cast<ShapedType>(getResultTypes()[i])) {
+      counter += shapedType.getNumDynamicDims();
+    }
+  }
+  auto shapedType = dyn_cast<ShapedType>(getResultTypes()[idx]);
+  return getResultDims().slice(counter,
+                               shapedType ? shapedType.getNumDynamicDims() : 0);
+}
+
+bool HoistableDispatchOp::isAtomicallyHoistableOp() { return true; }
 
 //===----------------------------------------------------------------------===//
 // flow.dispatch.tie_shape

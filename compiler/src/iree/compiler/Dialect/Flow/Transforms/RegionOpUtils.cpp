@@ -107,16 +107,16 @@ SmallVector<Range> getLoopRanges(Operation *op, Location loc,
       });
 }
 
-/// Return `true` if an operation is within a `flow.dispatch.region` or
-/// `flow.dispatch.workgroups` op.
+/// Return `true` if an operation is within a `flow.dispatch.region`,
+/// `flow.dispatch.workgroups`, or `flow.hoistable_dispatch` op.
 bool isNonNullAndOutsideDispatch(Operation *op) {
   if (!op) {
     return false;
   }
   Operation *parentOp = op->getParentOp();
   while (parentOp) {
-    if (isa<IREE::Flow::DispatchRegionOp, IREE::Flow::DispatchWorkgroupsOp>(
-            parentOp)) {
+    if (isa<IREE::Flow::DispatchRegionOp, IREE::Flow::DispatchWorkgroupsOp,
+            IREE::Flow::HoistableDispatchOp>(parentOp)) {
       return false;
     }
     parentOp = parentOp->getParentOp();

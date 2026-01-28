@@ -297,18 +297,37 @@ LogicalResult GlobalEncodingAnalyzer::collectGlobalEncodings() {
   LDBG() << "--- collectGlobalEncodings ---";
   // Walk all initializers to find encoding patterns:
   //   %source = util.global.load @source_global (or stream.tensor.constant)
-  //   %encoded = stream.tensor.encode %source ...
+  //   %encoded = stream.hoistable_dispatch(%source) -> (...) {
+  //     stream.tensor.encode ...
+  //     stream.yield ...
+  //   }
   //   util.global.store %encoded, @encoded_global
   for (auto initOp : moduleOp.getOps<IREE::Util::InitializerOp>()) {
-    initOp.walk([&](IREE::Stream::TensorEncodeOp encodeOp) {
-      LDBG() << "  Found TensorEncodeOp: " << encodeOp;
+    // Handle HoistableDispatchOp containing TensorEncodeOp.
+    initOp.walk([&](IREE::Stream::HoistableDispatchOp dispatchOp) {
+      LDBG() << "  Found HoistableDispatchOp: " << dispatchOp;
+      if (dispatchOp.getNumResults() != 1) {
+        LDBG() << "    Skipping: multiple results not supported";
+        return;
+      }
+
+      // Find the TensorEncodeOp inside the region.
+      IREE::Stream::TensorEncodeOp encodeOp;
+      dispatchOp.getBody().walk([&](IREE::Stream::TensorEncodeOp op) {
+        encodeOp = op;
+      });
+      if (!encodeOp) {
+        LDBG() << "    Skipping: no encode op found inside";
+        return;
+      }
+
       Type resultType = encodeOp.getResultEncoding();
       if (!hasRecognizedEncoding(resultType)) {
         LDBG() << "    Skipping: no recognized encoding";
         return;
       }
 
-      auto storeOp = findStoreOp(encodeOp.getResult());
+      auto storeOp = findStoreOp(dispatchOp.getResult(0));
       if (!storeOp) {
         LDBG() << "    Skipping: no store found";
         return;
@@ -324,7 +343,13 @@ LogicalResult GlobalEncodingAnalyzer::collectGlobalEncodings() {
         LDBG() << "    Skipping: mutable encoded global";
         return;
       }
-      SourceTraceResult traceResult = traceToSource(encodeOp.getSource());
+
+      // Trace source from the dispatch region's input.
+      if (dispatchOp.getInputs().empty()) {
+        LDBG() << "    Skipping: no inputs to trace";
+        return;
+      }
+      SourceTraceResult traceResult = traceToSource(dispatchOp.getInputs()[0]);
       if (!traceResult) {
         LDBG() << "    Skipping: failed to trace to source";
         return;
@@ -338,15 +363,14 @@ LogicalResult GlobalEncodingAnalyzer::collectGlobalEncodings() {
       encodedInfo.encodeOp = encodeOp;
       encodedInfo.encodingAttr =
           cast<RankedTensorType>(resultType).getEncoding();
-      encodedInfo.sizeofOp = encodeOp.getResultSize()
+      // For dispatch regions, the sizeof is outside the region.
+      encodedInfo.sizeofOp = dispatchOp.getResultSizes()[0]
                                  .getDefiningOp<IREE::Stream::TensorSizeOfOp>();
       if (!encodedInfo.sizeofOp) {
-        LDBG() << "    Skipping: no sizeof op found for result size, can't "
-                  "update corresponding size computations later";
+        LDBG() << "    Skipping: no sizeof op found for result size";
         return;
       }
       SourceGlobalInfo &sourceInfo = sourceGlobals[sourceKey];
-      // Store the trace result if not already set.
       if (!sourceInfo.source) {
         sourceInfo.source = traceResult;
       }

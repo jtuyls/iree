@@ -184,6 +184,9 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   // Specialize the encodings before the lowering of stream tensor ops.
   passManager.addPass(IREE::Stream::createSpecializeEncodingsPass());
 
+  // Materialize encoding dispatch regions to actual dispatches.
+  passManager.addPass(IREE::Stream::createMaterializeEncodingsPass());
+
   // Lower stream.tensor.* ops to stream.async.* ops based on
   // affinity/configuration assigned during placement.
   FunctionLikeNest(passManager)

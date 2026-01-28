@@ -32,9 +32,15 @@ void ConvertEncodingToFlowPass::runOnOperation() {
   FunctionOpInterface funcOp = getOperation();
   IRRewriter rewriter(&getContext());
 
+  // Helper to check if op is inside a dispatch region.
+  auto isInsideDispatchRegion = [](Operation *op) {
+    return op->getParentOfType<IREE::Flow::DispatchRegionOp>() ||
+           op->getParentOfType<IREE::Flow::HoistableDispatchOp>();
+  };
+
   // Convert the set_encoding ops.
   funcOp.walk([&](IREE::Encoding::SetEncodingOp encodingOp) {
-    if (encodingOp->getParentOfType<IREE::Flow::DispatchRegionOp>()) {
+    if (isInsideDispatchRegion(encodingOp)) {
       return;
     }
     rewriter.setInsertionPointAfter(encodingOp);
@@ -50,7 +56,7 @@ void ConvertEncodingToFlowPass::runOnOperation() {
 
   // Convert the unset_encoding ops.
   funcOp.walk([&](IREE::Encoding::UnsetEncodingOp encodingOp) {
-    if (encodingOp->getParentOfType<IREE::Flow::DispatchRegionOp>()) {
+    if (isInsideDispatchRegion(encodingOp)) {
       return;
     }
     rewriter.setInsertionPointAfter(encodingOp);

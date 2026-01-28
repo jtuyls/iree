@@ -73,6 +73,65 @@ def FLOW_DispatchRegionOp : FLOW_PureOp<"dispatch.region", [
   }];
 }
 
+def FLOW_HoistableDispatchOp : FLOW_PureOp<"hoistable_dispatch", [
+    SingleBlockImplicitTerminator<"IREE::Flow::ReturnOp">,
+    DeclareOpInterfaceMethods<Util_HoistableOpInterface, [
+      "isAtomicallyHoistableOp",
+    ]>,
+    Util_ShapeAwareOp,
+    AttrSizedOperandSegments]> {
+  let summary = [{A hoistable dispatch containing pure operations.}];
+  let description = [{
+    This op is a container for pure operations that can be hoisted into
+    initializers for globals. The region contains encoding ops and any
+    supporting pure tensor operations. Values from outside the region can
+    be implicitly captured.
+
+    Unlike regular dispatch.region ops, this op:
+    - Is hoistable (can be moved into initializers)
+    - Only allows pure ops inside
+    - Does not have workgroup count computation (that happens during
+      materialization to actual dispatches)
+
+    When converted to Stream dialect, these become stream.hoistable_dispatch
+    ops which can be unified and specialized. Finally, they are materialized
+    into actual dispatches.
+
+    Example:
+    ```mlir
+    %result = flow.hoistable_dispatch(%input : tensor<4x8xf32>)
+        -> (tensor<4x8xf32, #encoding>) {
+      %0 = iree_encoding.set_encoding %input : tensor<4x8xf32>
+          -> tensor<4x8xf32, #encoding>
+      flow.return %0 : tensor<4x8xf32, #encoding>
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<AnyType>:$inputs,
+    FLOW_ShapeDynamicDims:$input_dims,
+    FLOW_ShapeDynamicDims:$result_dims
+  );
+
+  let results = (outs Variadic<FLOW_Tensor>:$results);
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    ValueRange getInputDynamicDims(unsigned idx);
+    ValueRange getResultDynamicDims(unsigned idx);
+
+    // ShapeAwareOpInterface uses getOperandDynamicDims, delegate to inputs.
+    ValueRange getOperandDynamicDims(unsigned idx) {
+      return getInputDynamicDims(idx);
+    }
+  }];
+}
+
 def FLOW_DispatchWorkgroupsOp : FLOW_PureOp<"dispatch.workgroups", [
   IsolatedFromAbove,
   AttrSizedOperandSegments,

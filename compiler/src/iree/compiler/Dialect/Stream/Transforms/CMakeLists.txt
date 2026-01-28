@@ -44,6 +44,7 @@ iree_cc_library(
     "RefineUsage.cpp"
     "ReuseAllocations.cpp"
     "ScheduleAllocation.cpp"
+    "MaterializeEncodings.cpp"
     "ScheduleConcurrency.cpp"
     "ScheduleExecution.cpp"
     "SpecializeDispatches.cpp"

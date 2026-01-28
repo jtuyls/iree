@@ -31,6 +31,69 @@ namespace mlir::iree_compiler::DispatchCreation {
 
 namespace {
 
+/// Wraps an encoding op (SetEncodingOp or UnsetEncodingOp) in an
+/// hoistable_dispatch op with implicit capture.
+static FailureOr<IREE::Flow::HoistableDispatchOp>
+wrapEncodingOpInDispatchRegion(RewriterBase &rewriter, Operation *encodingOp) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(encodingOp);
+  Location loc = encodingOp->getLoc();
+
+  // Get the input tensor and result type.
+  Value source = encodingOp->getOperand(0);
+  auto sourceType = cast<RankedTensorType>(source.getType());
+  auto resultType = cast<RankedTensorType>(encodingOp->getResult(0).getType());
+
+  // Collect dynamic dims from the source type for input_dims.
+  SmallVector<Value> inputDims;
+  for (auto [idx, dim] : llvm::enumerate(sourceType.getShape())) {
+    if (ShapedType::isDynamic(dim)) {
+      inputDims.push_back(
+          tensor::DimOp::create(rewriter, loc, source, idx).getResult());
+    }
+  }
+
+  // Collect dynamic dims for the result type.
+  SmallVector<Value> resultDims;
+  for (auto [idx, dim] : llvm::enumerate(resultType.getShape())) {
+    if (ShapedType::isDynamic(dim)) {
+      // For encoding ops, result dims come from the op itself or source.
+      if (auto setEncoding =
+              dyn_cast<IREE::Encoding::SetEncodingOp>(encodingOp)) {
+        // SetEncodingOp preserves dims from source type.
+        resultDims.push_back(
+            tensor::DimOp::create(rewriter, loc, source, idx).getResult());
+      } else if (auto unsetEncoding =
+                     dyn_cast<IREE::Encoding::UnsetEncodingOp>(encodingOp)) {
+        // UnsetEncodingOp has explicit result dims.
+        unsigned dynamicIdx = resultType.getDynamicDimIndex(idx);
+        if (dynamicIdx < unsetEncoding.getResultDims().size()) {
+          resultDims.push_back(unsetEncoding.getResultDims()[dynamicIdx]);
+        }
+      }
+    }
+  }
+
+  // Create the encoding dispatch region with the source as input.
+  auto dispatchOp = IREE::Flow::HoistableDispatchOp::create(
+      rewriter, loc, resultType, ValueRange{source}, inputDims, resultDims);
+
+  // Create the body block (no block arguments - uses implicit capture).
+  Block *body = rewriter.createBlock(&dispatchOp.getBody());
+  rewriter.setInsertionPointToStart(body);
+
+  // Clone the encoding op into the region (implicit capture of all operands).
+  Operation *clonedOp = rewriter.clone(*encodingOp);
+
+  // Return the result.
+  IREE::Flow::ReturnOp::create(rewriter, loc, clonedOp->getResult(0));
+
+  // Replace uses of the original op with the dispatch result.
+  rewriter.replaceOp(encodingOp, dispatchOp.getResults());
+
+  return dispatchOp;
+}
+
 /// Return true if the op is fusable with a SetEncodingOp consumer. The op's
 /// containing dispatch must contain only:
 ///   - Reshape ops, encoding ops, linalg ops, gather ops, and attention ops.
@@ -110,7 +173,7 @@ struct FuseEncodingOpsIntoDispatchRegionsPass final
       }
     }
 
-    // Second pass: wrap any remaining encoding ops in their own dispatches.
+    // Second pass: wrap any remaining encoding ops in hoistable_dispatch.
     SmallVector<Operation *> remainingEncodingOps;
     funcOp->walk([&](Operation *op) {
       if (isa<IREE::Encoding::SetEncodingOp, IREE::Encoding::UnsetEncodingOp>(
@@ -120,7 +183,7 @@ struct FuseEncodingOpsIntoDispatchRegionsPass final
       }
     });
     for (Operation *op : remainingEncodingOps) {
-      if (failed(IREE::Flow::wrapOpInDispatchRegion(rewriter, op))) {
+      if (failed(wrapEncodingOpInDispatchRegion(rewriter, op))) {
         return signalPassFailure();
       }
     }
