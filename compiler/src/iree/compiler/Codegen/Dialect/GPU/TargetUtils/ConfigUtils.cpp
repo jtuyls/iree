@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/ConfigUtils.h"
 
 #include "iree/compiler/Codegen/Common/GPU/GPUHeuristics.h"
+#include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/Common/TileInferenceUtils.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
@@ -1197,6 +1198,96 @@ static bool isNonMatvecContraction(Operation *op) {
          getElementCount(contractionDims->n) != 1;
 }
 
+/// Helper to identify convolution operations that benefit from operand
+/// promotion to shared memory. When threads are distributed along output
+/// channels (OC), each thread independently reads a slice of the filter
+/// tensor of size IC * KH * KW elements. If this per-thread working set
+/// exceeds the GPU's L0 vector cache, adjacent threads' filter accesses
+/// thrash the cache, causing severe performance degradation. Promoting
+/// operands to shared memory (LDS) enables cooperative loading with
+/// coalesced global memory access, fixing the cache thrashing.
+///
+/// The heuristic applies two checks:
+/// 1. Per-thread filter working set > L0 cache (16KB on RDNA3/4)
+/// 2. Workgroup distributes threads primarily along OC, not spatial dims
+///
+/// The second check is critical: LDS promotion only helps when threads are
+/// colocated on the same output spatial position. We inspect the actual
+/// workgroupTileSizes to verify this, rather than trying to predict it.
+static bool shouldPromoteConvolutionFilterToLDS(
+    Operation *op, ArrayRef<int64_t> workgroupTileSizes,
+    IREE::GPU::TargetAttr target) {
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+  if (!linalgOp) {
+    return false;
+  }
+  FailureOr<mlir::linalg::ConvolutionDimensions> convDims =
+      mlir::linalg::inferConvolutionDims(linalgOp);
+  if (failed(convDims)) {
+    return false;
+  }
+  // Compute the per-thread reduction size: IC * KH * KW (product of input
+  // channel and filter spatial loop dimensions).
+  SmallVector<int64_t> bounds = linalgOp.getStaticLoopRanges();
+  int64_t reductionSize = 1;
+  for (unsigned dim : convDims->inputChannel) {
+    if (dim < bounds.size() && !ShapedType::isDynamic(bounds[dim])) {
+      reductionSize *= bounds[dim];
+    }
+  }
+  for (unsigned dim : convDims->filterLoop) {
+    if (dim < bounds.size() && !ShapedType::isDynamic(bounds[dim])) {
+      reductionSize *= bounds[dim];
+    }
+  }
+  // Get element size in bytes from the filter operand (DPS input 1).
+  auto filterType =
+      cast<ShapedType>(linalgOp.getDpsInputOperand(1)->get().getType());
+  unsigned elementBits = filterType.getElementTypeBitWidth();
+  int64_t elementBytes = (elementBits + 7) / 8;
+
+  // Per-thread filter working set: the amount of filter data each thread
+  // reads when distributed along output channels.
+  int64_t perThreadFilterBytes = reductionSize * elementBytes;
+
+  // Check #1: Ensure per-thread filter working set exceeds L0 vector cache.
+  // Query L0 cache size per WGP from target, then compute per-SIMD.
+  // Skip LDS promotion if target info unavailable (optimization requires
+  // accurate target characteristics).
+  std::optional<int32_t> l0CacheBytesPerWgp =
+      target.getWgp().getL0CacheBytesPerWgp();
+  std::optional<int32_t> simdsPerWgp = target.getWgp().getSimdsPerWgp();
+  if (!l0CacheBytesPerWgp || !simdsPerWgp || *simdsPerWgp <= 0) {
+    return false; // Skip promotion without target info
+  }
+  int64_t l0CachePerSimd = *l0CacheBytesPerWgp / *simdsPerWgp;
+  if (perThreadFilterBytes <= l0CachePerSimd) {
+    return false;
+  }
+
+  // Check #2: Ensure threads are distributed primarily along output channels,
+  // not spatial dims. LDS promotion only helps when threads are colocated on
+  // the same output spatial position - otherwise, each thread works on a
+  // different spatial location and there's no shared filter data to
+  // cooperatively load.
+  //
+  // We inspect the actual workgroupTileSizes: for convolutions with loop order
+  // [OC, OH, OW, IC, KH, KW], a tiling like [32, 1, 1, ...] means all 32
+  // threads work on different OCs at the same spatial position (good for LDS).
+  // A tiling like [2, 4, 4, ...] means threads are spread across spatial dims
+  // (bad for LDS - adds overhead without benefit).
+  //
+  // Heuristic: only promote if spatial tile sizes (OH, OW) are 1, indicating
+  // threads aren't distributed across spatial dimensions.
+  for (unsigned dim : convDims->outputImage) {
+    if (dim < workgroupTileSizes.size() && workgroupTileSizes[dim] > 1) {
+      // Spatial dimension is tiled across threads --> threads not colocated
+      return false;
+    }
+  }
+  return true;
+}
+
 // To find the number of vector elements per work-item, find a
 // bit width that is representative of the computation.
 static unsigned getRepresentativeBitWidth(linalg::LinalgOp linalgOp) {
@@ -1628,7 +1719,8 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
       {"thread", b.getI64ArrayAttr(threadTileSizes)},
   };
 
-  if (isNonMatvecContraction(op)) {
+  if (isNonMatvecContraction(op) ||
+      shouldPromoteConvolutionFilterToLDS(op, workgroupTileSizes, target)) {
     GPU::appendPromotedOperandsList(context, attrs, {0, 1});
   }
 

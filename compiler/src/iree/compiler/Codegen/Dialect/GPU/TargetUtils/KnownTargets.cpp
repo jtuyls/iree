@@ -58,6 +58,7 @@ struct WgpDetails {
   std::optional<int32_t> vgprSpaceBits;
   std::optional<ArrayRef<int64_t>> dmaSizes;
   std::optional<int32_t> workgroupMemoryBankCount;
+  std::optional<int32_t> l0CacheBytesPerWgp;
 };
 
 // Chip level feature/limit details
@@ -151,7 +152,8 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
       wgp->maxThreadSize, wgp->maxWorkgroupMemoryBytes,
       DenseI32ArrayAttr::get(context, wgp->maxWorkgroupCounts),
       wgp->maxLoadInstructionBits, wgp->simdsPerWgp, wgp->vgprSpaceBits,
-      dmaSizesAttr, wgp->workgroupMemoryBankCount, DictionaryAttr{});
+      dmaSizesAttr, wgp->workgroupMemoryBankCount, wgp->l0CacheBytesPerWgp,
+      DictionaryAttr{});
 
   TargetChipAttr targetChip;
   if (details.chip) {
@@ -394,7 +396,8 @@ const WgpDetails *getRDNA4WgpDetails() {
                                       /*simdsPerWgp=*/4,
                                       /*vgprSpaceBits=*/256 * 32,
                                       /*dmaSizes=*/std::nullopt,
-                                      /*workgroupMemoryBankCount=*/64};
+                                      /*workgroupMemoryBankCount=*/64,
+                                      /*l0CacheBytesPerWgp=*/64 * 1024};
   return &rdna4Wgp;
 }
 
@@ -424,7 +427,8 @@ const WgpDetails *getRDNA3WgpDetails() {
                                       /*simdsPerWgp=*/4,
                                       /*vgprSpaceBits=*/256 * 32,
                                       /*dmaSizes=*/std::nullopt,
-                                      /*workgroupMemoryBankCount=*/64};
+                                      /*workgroupMemoryBankCount=*/64,
+                                      /*l0CacheBytesPerWgp=*/64 * 1024};
   return &rdna3Wgp;
 }
 
@@ -441,7 +445,13 @@ const WgpDetails *getRDNA2WgpDetails() {
                                       {1024, 1024, 1024},
                                       1024,
                                       64 * 1024,
-                                      {0x7fffffff, 0x7fffffff, 0x7fffffff}};
+                                      {0x7fffffff, 0x7fffffff, 0x7fffffff},
+                                      /*maxLoadInstructionBits=*/std::nullopt,
+                                      /*simdsPerWgp=*/4,
+                                      /*vgprSpaceBits=*/std::nullopt,
+                                      /*dmaSizes=*/std::nullopt,
+                                      /*workgroupMemoryBankCount=*/std::nullopt,
+                                      /*l0CacheBytesPerWgp=*/32 * 1024};
   return &rdna2Wgp;
 }
 

@@ -761,6 +761,8 @@ def IREEGPU_TargetWgpAttr : AttrDef<IREEGPU_Dialect, "TargetWgp"> {
     OptionalParameter<"DenseI64ArrayAttr">:$dma_sizes,
     // Number of banks in LDS.
     OptionalParameter<"std::optional<int32_t>">:$workgroup_memory_bank_count,
+    // L0 vector cache size per workgroup processor in bytes. Present on RDNA architectures.
+    OptionalParameter<"std::optional<int32_t>">:$l0_cache_bytes_per_wgp,
 
     // An optional extra dict
     // This field allows to inject more features/limits not supported in the
